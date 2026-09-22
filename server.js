@@ -1,0 +1,1600 @@
+require("dotenv").config();
+
+const express = require("express");
+const session = require("express-session");
+const Database = require("better-sqlite3");
+const multer = require("multer");
+const XLSX = require("xlsx");
+const nodemailer = require("nodemailer");
+const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
+const AdmZip = require("adm-zip");
+
+const app = express();
+const PORT = Number(process.env.PORT || 3000);
+const MAX = Number(process.env.MAX_RECIPIENTS_PER_CAMPAIGN || 2000);
+
+fs.mkdirSync(path.join(__dirname, "data"), { recursive: true });
+fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
+fs.mkdirSync(path.join(__dirname, "uploads", "attachments"), { recursive: true });
+fs.mkdirSync(path.join(__dirname, "uploads", "pdf-folders"), { recursive: true });
+
+const db = new Database(path.join(__dirname, "data", "smartmail.db"));
+db.pragma("journal_mode = WAL");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  number TEXT DEFAULT '',
+  details TEXT DEFAULT '',
+  extra_json TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT DEFAULT 'draft',
+  total INTEGER DEFAULT 0,
+  sent INTEGER DEFAULT 0,
+  failed INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  original_name TEXT NOT NULL,
+  stored_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  mime_type TEXT DEFAULT 'application/octet-stream',
+  size INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS campaign_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  attachment_id INTEGER NOT NULL,
+  FOREIGN KEY(campaign_id) REFERENCES campaigns(id),
+  FOREIGN KEY(attachment_id) REFERENCES attachments(id)
+);
+
+CREATE TABLE IF NOT EXISTS campaign_recipients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  contact_id INTEGER,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  rendered_subject TEXT NOT NULL,
+  rendered_body TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  error TEXT DEFAULT '',
+  sent_at TEXT,
+  FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+`);
+
+try { db.exec("ALTER TABLE campaigns ADD COLUMN sender_type TEXT DEFAULT 'microsoft'"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN sender_email TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN pdf_folder_id TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN skipped INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN delay_seconds INTEGER DEFAULT 5"); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN pdf_match_status TEXT DEFAULT 'na'"); } catch {}
+
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+const spreadsheetUpload = multer({
+  dest: path.join(__dirname, "uploads"),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(xlsx|xls|csv)$/i.test(file.originalname);
+    cb(ok ? null : new Error("Only .xlsx, .xls or .csv files are allowed."), ok);
+  }
+});
+
+const attachmentStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, path.join(__dirname, "uploads", "attachments")),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const safeBase = path.basename(file.originalname, ext).replace(/[^a-z0-9_-]/gi, "_").slice(0, 60) || "attachment";
+    cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${safeBase}${ext}`);
+  }
+});
+
+const allowedAttachmentExt = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|jpg|jpeg|png|gif|webp|zip)$/i;
+const attachmentUpload = multer({
+  storage: attachmentStorage,
+  limits: { fileSize: 15 * 1024 * 1024, files: 8 },
+  fileFilter: (req, file, cb) => {
+    const ok = allowedAttachmentExt.test(file.originalname);
+    cb(ok ? null : new Error("Unsupported attachment type. Use PDF, Word, Excel, PowerPoint, TXT, CSV, JPG, PNG, GIF, WEBP or ZIP."), ok);
+  }
+});
+
+// PDF folder upload — stores PDFs under uploads/pdf-folders/<folderId>/
+const pdfFolderStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const folderId = req.pdfFolderId || (req.pdfFolderId = `pf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const dir = path.join(__dirname, "uploads", "pdf-folders", folderId);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    // Keep original filename so we can match by name later
+    cb(null, file.originalname);
+  }
+});
+
+const pdfFolderUpload = multer({
+  storage: pdfFolderStorage,
+  limits: { fileSize: 50 * 1024 * 1024, files: 500 },
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(pdf|zip)$/i.test(file.originalname);
+    cb(ok ? null : new Error("Only PDF files or a ZIP of PDFs are allowed."), ok);
+  }
+});
+
+// Find a PDF in folderPath matching recipientName
+function findPdfForRecipient(folderPath, recipientName) {
+  if (!folderPath || !fs.existsSync(folderPath)) return null;
+  let files;
+  try { files = fs.readdirSync(folderPath); } catch { return null; }
+
+  const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const target = norm(recipientName);
+
+  // 1. Full name match: "Rahul Sharma.pdf"
+  let match = files.find(f =>
+    /\.pdf$/i.test(f) && norm(path.basename(f, path.extname(f))) === target
+  );
+  if (match) return path.join(folderPath, match);
+
+  // 2. First word / first name match: "Rahul.pdf" matches "Rahul Sharma"
+  const firstName = norm((recipientName || "").split(/\s+/)[0]);
+  if (firstName && firstName !== target) {
+    match = files.find(f =>
+      /\.pdf$/i.test(f) && norm(path.basename(f, path.extname(f))) === firstName
+    );
+    if (match) return path.join(folderPath, match);
+  }
+
+  return null; // No match — this contact will be skipped
+}
+
+
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: process.env.SESSION_SECRET || "dev-only-change-me",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, sameSite: "lax", maxAge: 8 * 60 * 60 * 1000 }
+}));
+app.use(express.static(path.join(__dirname, "public")));
+
+function auth(req, res, next) {
+  if (!req.session.user) return res.status(401).json({ error: "Please log in." });
+  next();
+}
+
+function normalizeKey(k) {
+  return String(k || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function pick(row, names) {
+  const keys = Object.keys(row);
+  for (const wanted of names) {
+    const hit = keys.find(k => normalizeKey(k) === normalizeKey(wanted));
+    if (hit !== undefined) return row[hit];
+  }
+  return "";
+}
+
+function cleanEmail(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+function validEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function getContacts() {
+  return db.prepare("SELECT * FROM contacts ORDER BY id ASC").all().map(c => {
+    let extras = {};
+    try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+    return { ...c, ...extras };
+  });
+}
+
+function renderTemplate(template, contact) {
+  let out = String(template || "");
+  const values = { ...contact };
+  let extras = {};
+  try { extras = JSON.parse(contact.extra_json || "{}"); } catch {}
+  Object.assign(values, extras);
+
+  for (const [key, value] of Object.entries(values)) {
+    const safe = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp("\\{\\{" + safe + "\\}\\}", "gi"), String(value ?? ""));
+  }
+  return out;
+}
+
+function getAttachmentRecords(ids) {
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const cleanIds = [...new Set(ids.map(Number).filter(Number.isInteger))];
+  if (!cleanIds.length) return [];
+  const placeholders = cleanIds.map(() => "?").join(",");
+  return db.prepare(`SELECT id, original_name, file_path, mime_type FROM attachments WHERE id IN (${placeholders})`).all(...cleanIds)
+    .filter(a => fs.existsSync(a.file_path))
+    .map(a => ({ filename: a.original_name, path: a.file_path, contentType: a.mime_type }));
+}
+
+// Settings helpers
+function getSetting(key, fallback = null) {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key);
+    return row ? row.value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function setSetting(key, value) {
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, String(value));
+}
+
+function deleteSetting(key) {
+  db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+}
+
+// Microsoft OAuth & Graph API helpers
+function getMicrosoftConfig() {
+  const clientId = process.env.MICROSOFT_CLIENT_ID || getSetting("ms_client_id") || "";
+  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || getSetting("ms_client_secret") || "";
+  const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "common";
+  const redirectUri = process.env.MICROSOFT_REDIRECT_URI || getSetting("ms_redirect_uri") || `http://localhost:${PORT}/auth/microsoft/callback`;
+  return {
+    clientId: String(clientId || "").trim(),
+    clientSecret: String(clientSecret || "").trim(),
+    tenantId: String(tenantId || "common").trim(),
+    redirectUri: String(redirectUri || "").trim()
+  };
+}
+
+async function getValidMicrosoftAccessToken() {
+  const raw = getSetting("ms_tokens");
+  if (!raw) {
+    throw new Error("Microsoft Outlook account is not connected. Please connect your account first.");
+  }
+  let tokens;
+  try {
+    tokens = JSON.parse(raw);
+  } catch {
+    throw new Error("Corrupted Microsoft token storage. Please reconnect your Outlook account.");
+  }
+
+  // If token is valid for at least 3 more minutes, return it
+  if (tokens.access_token && tokens.expires_at && tokens.expires_at > Date.now() + 3 * 60 * 1000) {
+    return tokens.access_token;
+  }
+
+  if (!tokens.refresh_token) {
+    throw new Error("No refresh token available. Please reconnect your Microsoft Outlook account.");
+  }
+
+  const config = getMicrosoftConfig();
+  if (!config.clientId) {
+    throw new Error("Microsoft Client ID is missing. Configure it in .env or Settings.");
+  }
+
+  const refreshParams = new URLSearchParams({
+    client_id: config.clientId,
+    grant_type: "refresh_token",
+    refresh_token: tokens.refresh_token,
+    scope: "offline_access User.Read Mail.Send"
+  });
+  if (config.clientSecret) {
+    refreshParams.append("client_secret", config.clientSecret);
+  }
+
+  const refreshRes = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: refreshParams.toString()
+  });
+
+  const data = await refreshRes.json();
+  if (!refreshRes.ok || data.error) {
+    throw new Error(data.error_description || data.error || "Failed to refresh Microsoft token. Please reconnect Outlook.");
+  }
+
+  tokens.access_token = data.access_token;
+  if (data.refresh_token) tokens.refresh_token = data.refresh_token;
+  tokens.expires_at = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+
+  setSetting("ms_tokens", JSON.stringify(tokens));
+  return tokens.access_token;
+}
+
+async function sendMailViaMicrosoftGraph({ to, subject, body, attachments = [] }) {
+  const accessToken = await getValidMicrosoftAccessToken();
+
+  const graphAttachments = [];
+  for (const att of attachments) {
+    const filePath = att.file_path || att.path;
+    if (filePath && fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath);
+      graphAttachments.push({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: att.original_name || att.filename || path.basename(filePath),
+        contentType: att.mime_type || att.contentType || "application/octet-stream",
+        contentBytes: content.toString("base64")
+      });
+    }
+  }
+
+  const isHtml = /<[a-z][\s\S]*>/i.test(body);
+
+  const payload = {
+    message: {
+      subject: String(subject || ""),
+      body: {
+        contentType: isHtml ? "HTML" : "Text",
+        content: String(body || "")
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: String(to).trim()
+          }
+        }
+      ],
+      attachments: graphAttachments
+    },
+    saveToSentItems: true
+  };
+
+  const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (res.status === 202) {
+    return { ok: true, messageId: `Graph-${Date.now()}` };
+  }
+
+  const errData = await res.json().catch(() => ({}));
+  const msg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+  throw new Error(`Microsoft Graph error: ${msg}`);
+}
+
+function getTransporter() {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    throw new Error("SMTP is not configured. Open .env and add SMTP_HOST, SMTP_USER and SMTP_PASS.");
+  }
+
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE || "true").toLowerCase() === "true",
+    family: 4,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+}
+
+// Convert plain text body to clean HTML — improves inbox deliverability
+function textToHtml(text) {
+  const escaped = String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const paragraphs = escaped.split(/\n{2,}/).map(p =>
+    `<p style="margin:0 0 14px 0;line-height:1.6">${p.replace(/\n/g, "<br>")}</p>`
+  ).join("");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;background:#fff;padding:24px;max-width:600px;margin:auto">
+${paragraphs}
+</body></html>`;
+}
+
+// Build anti-spam compliant mail options for SMTP
+function buildSmtpMailOptions({ from, to, subject, body, attachments = [] }) {
+  const fromName = process.env.MAIL_FROM_NAME || process.env.SMTP_USER || "SmartMail";
+  const fromAddr = process.env.MAIL_FROM || process.env.SMTP_USER;
+  const isHtml = /^<!DOCTYPE|^<html/i.test(String(body || "").trim());
+  const htmlBody = isHtml ? body : textToHtml(body);
+  const textBody = isHtml
+    ? String(body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+    : String(body || "");
+
+  const domain = (fromAddr || "").split("@")[1] || "localhost";
+  const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@${domain}>`;
+
+  return {
+    from: `"${fromName}" <${fromAddr}>`,
+    replyTo: fromAddr,
+    to,
+    subject,
+    text: textBody,
+    html: htmlBody,
+    attachments,
+    messageId,
+    headers: {
+      "X-Mailer": "SmartMail-Pro",
+      "X-Priority": "3",
+      "Mime-Version": "1.0",
+      "List-Unsubscribe": `<mailto:${fromAddr}?subject=Unsubscribe>`
+    }
+  };
+}
+
+
+let sendLock = false;
+
+// Microsoft OAuth Endpoints
+app.get("/auth/microsoft/login", (req, res) => {
+  const config = getMicrosoftConfig();
+  if (!config.clientId) {
+    return res.redirect("/?error=microsoft_client_id_missing");
+  }
+
+  const state = crypto.randomBytes(16).toString("hex");
+  req.session.ms_oauth_state = state;
+
+  const scopes = "offline_access User.Read Mail.Send";
+  const authUrl = `https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/authorize?` +
+    new URLSearchParams({
+      client_id: config.clientId,
+      response_type: "code",
+      redirect_uri: config.redirectUri,
+      response_mode: "query",
+      scope: scopes,
+      state: state,
+      prompt: "select_account"
+    }).toString();
+
+  res.redirect(authUrl);
+});
+
+app.get("/auth/microsoft/callback", async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    console.error("Microsoft OAuth Callback Error:", error, error_description);
+    return res.redirect(`/?error=${encodeURIComponent(error_description || error)}`);
+  }
+
+  if (!code) {
+    return res.redirect("/?error=no_authorization_code_received");
+  }
+
+  const config = getMicrosoftConfig();
+  if (!config.clientId) {
+    return res.redirect("/?error=microsoft_client_id_missing");
+  }
+
+  try {
+    const tokenParams = new URLSearchParams({
+      client_id: config.clientId,
+      grant_type: "authorization_code",
+      code: String(code),
+      redirect_uri: config.redirectUri,
+      scope: "offline_access User.Read Mail.Send"
+    });
+    if (config.clientSecret) {
+      tokenParams.append("client_secret", config.clientSecret);
+    }
+
+    const tokenRes = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: tokenParams.toString()
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || tokenData.error) {
+      throw new Error(tokenData.error_description || tokenData.error || "Failed to exchange token with Microsoft");
+    }
+
+    // Retrieve user profile to determine email
+    const profileRes = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const profile = await profileRes.json();
+    const email = profile.mail || profile.userPrincipalName || "";
+    const name = profile.displayName || email;
+
+    const tokenRecord = {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_at: Date.now() + (Number(tokenData.expires_in) || 3600) * 1000,
+      email,
+      name,
+      scope: tokenData.scope
+    };
+
+    setSetting("ms_tokens", JSON.stringify(tokenRecord));
+    setSetting("ms_account_email", email);
+    setSetting("ms_account_name", name);
+
+    res.redirect("/?microsoft=connected");
+  } catch (err) {
+    console.error("Microsoft token exchange failed:", err);
+    res.redirect(`/?error=${encodeURIComponent(err.message)}`);
+  }
+});
+
+app.get("/api/microsoft/status", (req, res) => {
+  const config = getMicrosoftConfig();
+  const raw = getSetting("ms_tokens");
+  let connected = false;
+  let email = getSetting("ms_account_email") || null;
+  let name = getSetting("ms_account_name") || null;
+
+  if (raw) {
+    try {
+      const tokens = JSON.parse(raw);
+      if (tokens.access_token || tokens.refresh_token) {
+        connected = true;
+        if (!email) email = tokens.email || null;
+        if (!name) name = tokens.name || null;
+      }
+    } catch {}
+  }
+
+  res.json({
+    connected,
+    email,
+    name,
+    clientIdConfigured: Boolean(config.clientId),
+    config: {
+      clientId: config.clientId ? `${config.clientId.slice(0, 8)}...` : "",
+      tenantId: config.tenantId,
+      redirectUri: config.redirectUri
+    }
+  });
+});
+
+app.post("/api/microsoft/disconnect", auth, (req, res) => {
+  deleteSetting("ms_tokens");
+  deleteSetting("ms_account_email");
+  deleteSetting("ms_account_name");
+  res.json({ ok: true, message: "Microsoft account disconnected." });
+});
+
+app.post("/api/microsoft/config", auth, (req, res) => {
+  const { clientId, clientSecret, tenantId } = req.body || {};
+  if (clientId !== undefined) setSetting("ms_client_id", String(clientId).trim());
+  if (clientSecret !== undefined) setSetting("ms_client_secret", String(clientSecret).trim());
+  if (tenantId !== undefined) setSetting("ms_tenant_id", String(tenantId).trim() || "common");
+  res.json({ ok: true, message: "Microsoft OAuth configuration updated." });
+});
+
+app.post("/api/microsoft/check", auth, async (req, res) => {
+  try {
+    const accessToken = await getValidMicrosoftAccessToken();
+    const profileRes = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const profile = await profileRes.json();
+    if (!profileRes.ok) throw new Error(profile?.error?.message || "Failed to fetch Microsoft profile");
+    res.json({ ok: true, email: profile.mail || profile.userPrincipalName, name: profile.displayName });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get("/api/senders", auth, (req, res) => {
+  const senders = [];
+  const msEmail = getSetting("ms_account_email");
+  const msTokens = getSetting("ms_tokens");
+  const isMsConnected = Boolean(msTokens && msEmail);
+
+  if (isMsConnected) {
+    senders.push({
+      id: "microsoft",
+      type: "microsoft",
+      label: `Microsoft Outlook (${msEmail})`,
+      email: msEmail,
+      recommended: true
+    });
+  }
+
+  if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+    const smtpEmail = process.env.MAIL_FROM || process.env.SMTP_USER;
+    senders.push({
+      id: "smtp",
+      type: "smtp",
+      label: `Custom SMTP (${smtpEmail})`,
+      email: smtpEmail,
+      recommended: !isMsConnected
+    });
+  }
+
+  res.json({
+    senders,
+    defaultSender: isMsConnected ? "microsoft" : (senders[0]?.id || "microsoft"),
+    msConnected: isMsConnected
+  });
+});
+
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body || {};
+  const adminEmail = process.env.ADMIN_EMAIL || "admin@example.com";
+  const adminPassword = process.env.ADMIN_PASSWORD || "change-me";
+
+  if (email !== adminEmail || password !== adminPassword) {
+    return res.status(401).json({ error: "Invalid admin credentials." });
+  }
+
+  req.session.user = { email };
+  res.json({ ok: true, email });
+});
+
+app.post("/api/logout", (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+app.get("/api/me", (req, res) => {
+  res.json({ loggedIn: !!req.session.user, email: req.session.user?.email || null });
+});
+
+app.get("/api/dashboard", auth, (req, res) => {
+  const contacts = db.prepare("SELECT COUNT(*) c FROM contacts").get().c;
+  const campaigns = db.prepare("SELECT COUNT(*) c FROM campaigns").get().c;
+  const sent = db.prepare("SELECT COALESCE(SUM(sent),0) c FROM campaigns").get().c;
+  const failed = db.prepare("SELECT COALESCE(SUM(failed),0) c FROM campaigns").get().c;
+  const pending = db.prepare("SELECT COUNT(*) c FROM campaign_recipients WHERE status='pending'").get().c;
+  res.json({ contacts, campaigns, sent, failed, pending });
+});
+
+app.get("/api/contacts", auth, (req, res) => res.json(getContacts()));
+
+// ── SMTP Settings (read + update from UI) ─────────────────────────────────────
+app.get("/api/smtp-settings", auth, (req, res) => {
+  res.json({
+    host: process.env.SMTP_HOST || "",
+    port: process.env.SMTP_PORT || "587",
+    secure: process.env.SMTP_SECURE || "false",
+    user: process.env.SMTP_USER || "",
+    from: process.env.MAIL_FROM || process.env.SMTP_USER || "",
+    fromName: process.env.MAIL_FROM_NAME || ""
+  });
+});
+
+// Save SMTP settings into DB so they survive without editing .env
+app.post("/api/smtp-settings", auth, (req, res) => {
+  const { host, port, secure, user, pass, from, fromName } = req.body || {};
+  if (host !== undefined) setSetting("smtp_host", host);
+  if (port !== undefined) setSetting("smtp_port", String(port));
+  if (secure !== undefined) setSetting("smtp_secure", String(secure));
+  if (user !== undefined) setSetting("smtp_user", user);
+  if (pass && pass.trim()) setSetting("smtp_pass", pass.trim());
+  if (from !== undefined) setSetting("smtp_from", from);
+  if (fromName !== undefined) setSetting("smtp_from_name", fromName);
+  res.json({ ok: true, message: "SMTP settings saved." });
+});
+
+// Send a verification OTP — tests the new credentials directly
+let smtpOtpStore = {}; // { email: { otp, expires, pass, fromName } }
+
+app.post("/api/smtp-verify/send-otp", auth, async (req, res) => {
+  const { email, pass, fromName } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email is required." });
+  if (!pass)  return res.status(400).json({ error: "Password is required." });
+
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+
+  // Use the saved host (set just before by /api/smtp-settings), fall back to Outlook
+  const smtpHost   = getSetting("smtp_host")   || process.env.SMTP_HOST   || "smtp.office365.com";
+  const smtpPort   = Number(getSetting("smtp_port")   || process.env.SMTP_PORT   || 587);
+  const smtpSecure = String(getSetting("smtp_secure") || process.env.SMTP_SECURE || "false").toLowerCase() === "true";
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtpHost, port: smtpPort, secure: smtpSecure, family: 4,
+      auth: { user: email, pass }
+    });
+
+    await transporter.sendMail({
+      from: fromName ? `"${fromName}" <${email}>` : email,
+      to: email,
+      subject: "SmartMail Pro — Email Verification Code",
+      text: `Your SmartMail Pro verification code is:\n\n${otp}\n\nThis code expires in 5 minutes.\nIf you did not request this, ignore this email.`,
+      html: `<div style="font-family:sans-serif;max-width:400px;margin:auto;padding:32px;border-radius:12px;border:1px solid #e5e7eb">
+        <h2 style="margin:0 0 16px;color:#111">SmartMail Pro</h2>
+        <p style="color:#6b7280;margin:0 0 24px">Your email verification code:</p>
+        <div style="font-size:36px;font-weight:900;letter-spacing:12px;font-family:monospace;color:#635bff;background:#f5f3ff;padding:16px;border-radius:10px;text-align:center">${otp}</div>
+        <p style="color:#9ca3af;font-size:12px;margin-top:20px">Expires in 5 minutes. Ignore if you didn't request this.</p>
+      </div>`
+    });
+
+    // Store OTP + credentials (saved permanently only after correct code is entered)
+    smtpOtpStore[email] = { otp, expires: Date.now() + 5 * 60 * 1000, pass, fromName: fromName || "" };
+    res.json({ ok: true, message: `Code sent to ${email}. Check your inbox.` });
+  } catch (e) {
+    res.status(400).json({ error: `Connection failed: ${e.message}` });
+  }
+});
+
+app.post("/api/smtp-verify/confirm-otp", auth, (req, res) => {
+  const { email, otp } = req.body || {};
+  const record = smtpOtpStore[email];
+  if (!record) return res.status(400).json({ error: "No OTP found. Please request a new code." });
+  if (Date.now() > record.expires) {
+    delete smtpOtpStore[email];
+    return res.status(400).json({ error: "OTP expired. Please request a new code." });
+  }
+  if (String(otp).trim() !== record.otp) {
+    return res.status(400).json({ error: "Incorrect code. Try again." });
+  }
+
+  // ✅ Verified — save as the active SMTP sender
+  setSetting("smtp_host",      "smtp.office365.com");
+  setSetting("smtp_port",      "587");
+  setSetting("smtp_secure",    "false");
+  setSetting("smtp_user",      email);
+  setSetting("smtp_pass",      record.pass);
+  setSetting("smtp_from",      email);
+  setSetting("smtp_from_name", record.fromName);
+  setSetting("smtp_verified",  "true");
+
+  delete smtpOtpStore[email];
+  res.json({ ok: true, email, message: `✓ Switched! Campaigns will now send from ${email}.` });
+
+});
+
+// ── Microsoft Device Code Flow (sign in without App Password) ─────────────────
+let _deviceSessions = {}; // stateId → { device_code, clientId, tenantId }
+
+app.post("/api/microsoft/device-code/start", auth, async (req, res) => {
+  const clientId = getSetting("ms_client_id") || process.env.MS_CLIENT_ID;
+  const tenantId = getSetting("ms_tenant_id") || process.env.MS_TENANT_ID || "common";
+
+  if (!clientId) {
+    return res.status(400).json({
+      error: "Microsoft Client ID not set. Go to the '⊞ Microsoft OAuth' tab, enter your Client ID and save it first."
+    });
+  }
+
+  try {
+    const r = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/devicecode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        scope: "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access"
+      }).toString()
+    });
+
+    const data = await r.json();
+    if (!r.ok) return res.status(400).json({ error: data.error_description || "Failed to start sign-in." });
+
+    const stateId = crypto.randomBytes(8).toString("hex");
+    _deviceSessions[stateId] = { device_code: data.device_code, clientId, tenantId, interval: data.interval || 5 };
+
+    // Auto-cleanup after expiry
+    setTimeout(() => delete _deviceSessions[stateId], (data.expires_in || 900) * 1000);
+
+    res.json({
+      stateId,
+      user_code: data.user_code,
+      verification_uri: data.verification_uri || "https://microsoft.com/devicelogin",
+      expires_in: data.expires_in || 900
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/microsoft/device-code/poll", auth, async (req, res) => {
+  const { stateId } = req.body || {};
+  const state = _deviceSessions[stateId];
+  if (!state) return res.status(400).json({ error: "Session expired. Please start again." });
+
+  try {
+    const r = await fetch(`https://login.microsoftonline.com/${state.tenantId}/oauth2/v2.0/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: state.clientId,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: state.device_code
+      }).toString()
+    });
+
+    const data = await r.json();
+
+    if (data.error === "authorization_pending" || data.error === "slow_down") {
+      return res.json({ ready: false });
+    }
+
+    if (data.error) {
+      delete _deviceSessions[stateId];
+      return res.status(400).json({ error: data.error_description || data.error });
+    }
+
+    // ✅ Token received — get user's email
+    const userRes = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers: { Authorization: `Bearer ${data.access_token}` }
+    });
+    const user = await userRes.json();
+    const email = user.mail || user.userPrincipalName || "";
+
+    // Save token for use in campaigns (Graph API send)
+    setSetting("ms_access_token",  data.access_token);
+    setSetting("ms_refresh_token", data.refresh_token || "");
+    setSetting("ms_token_email",   email);
+    setSetting("ms_token_expiry",  String(Date.now() + (data.expires_in || 3600) * 1000));
+    setSetting("ms_client_id",     state.clientId);
+    setSetting("ms_tenant_id",     state.tenantId);
+
+    delete _deviceSessions[stateId];
+    res.json({ ready: true, email });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Save MS Client ID from UI (for device code flow)
+app.post("/api/microsoft/save-client", auth, (req, res) => {
+  const { clientId, tenantId } = req.body || {};
+  if (clientId) setSetting("ms_client_id", clientId);
+  if (tenantId) setSetting("ms_tenant_id", tenantId || "common");
+  res.json({ ok: true });
+});
+
+app.delete("/api/contacts", auth, (req, res) => {
+  db.prepare("DELETE FROM contacts").run();
+  res.json({ ok: true });
+});
+
+app.post("/api/upload", auth, spreadsheetUpload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No Excel file uploaded." });
+
+  try {
+    const workbook = XLSX.readFile(req.file.path, { cellDates: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    if (!sheet) throw new Error("The first sheet is empty.");
+
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    if (!rows.length) throw new Error("The first sheet is empty.");
+
+    const insert = db.prepare(`
+      INSERT INTO contacts (name,email,number,details,extra_json)
+      VALUES (?,?,?,?,?)
+    `);
+
+    const clear = db.prepare("DELETE FROM contacts");
+
+    const result = db.transaction(items => {
+      clear.run();
+      let added = 0;
+      let invalid = 0;
+      const seen = new Set();
+
+      const known = new Set([
+        "name", "fullname", "full name",
+        "loan number", "loannumber", "loan_number", "loanno", "loan no",
+        "email", "mail", "email address", "emailaddress",
+        "number", "phone", "mobile", "phone number", "mobile number",
+        "details", "detail", "description",
+        "branch", "branch name", "branchname"
+      ].map(normalizeKey));
+
+      for (const row of items) {
+        const name = String(pick(row, ["loan number", "loannumber", "loan_number", "loanno", "loan no", "name", "full name", "fullname"]) || "").trim();
+        const email = cleanEmail(pick(row, ["email", "mail", "email address", "emailaddress"]));
+        const number = String(pick(row, ["number", "phone", "mobile", "phone number", "mobile number"]) || "").trim();
+        const details = String(pick(row, ["details", "detail", "description"]) || "").trim();
+        const branch = String(pick(row, ["branch", "branch name", "branchname"]) || "").trim();
+
+        if (!name || !email || !validEmail(email) || seen.has(email)) {
+          invalid++;
+          continue;
+        }
+
+        seen.add(email);
+        const extras = {};
+        if (branch) extras["branch"] = branch;
+        for (const [k, v] of Object.entries(row)) {
+          if (!known.has(normalizeKey(k))) extras[k] = v;
+        }
+
+        insert.run(name, email, number, details, JSON.stringify(extras));
+        added++;
+      }
+
+      return { added, invalid };
+    })(rows);
+
+    fs.unlink(req.file.path, () => {});
+    res.json({ ok: true, ...result, contacts: getContacts() });
+  } catch (e) {
+    fs.unlink(req.file.path, () => {});
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post("/api/attachments", auth, (req, res) => {
+  attachmentUpload.array("files", 8)(req, res, err => {
+    if (err) return res.status(400).json({ error: err.message || "Attachment upload failed." });
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: "No attachment files selected." });
+
+    const totalSize = files.reduce((sum, f) => sum + Number(f.size || 0), 0);
+    if (totalSize > 24 * 1024 * 1024) {
+      files.forEach(f => fs.unlink(f.path, () => {}));
+      return res.status(400).json({ error: "Attachments are too large. Keep the total below 24 MB for reliable email sending." });
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO attachments (original_name, stored_name, file_path, mime_type, size)
+      VALUES (?,?,?,?,?)
+    `);
+    const attachments = files.map(file => {
+      const id = insert.run(
+        file.originalname,
+        file.filename,
+        file.path,
+        file.mimetype || "application/octet-stream",
+        file.size
+      ).lastInsertRowid;
+      return { id, name: file.originalname, size: file.size, type: file.mimetype || "application/octet-stream" };
+    });
+
+    res.json({ ok: true, attachments });
+  });
+});
+
+app.get("/api/attachments/:id", auth, (req, res) => {
+  const a = db.prepare("SELECT * FROM attachments WHERE id=?").get(req.params.id);
+  if (!a || !fs.existsSync(a.file_path)) return res.status(404).json({ error: "Attachment not found." });
+  res.download(a.file_path, a.original_name);
+});
+
+app.delete("/api/attachments/:id", auth, (req, res) => {
+  const a = db.prepare("SELECT * FROM attachments WHERE id=?").get(req.params.id);
+  if (!a) return res.status(404).json({ error: "Attachment not found." });
+  const used = db.prepare("SELECT COUNT(*) c FROM campaign_attachments WHERE attachment_id=?").get(a.id).c;
+  if (used) return res.status(400).json({ error: "This attachment is already linked to a campaign and cannot be removed." });
+  db.prepare("DELETE FROM attachments WHERE id=?").run(a.id);
+  fs.unlink(a.file_path, () => {});
+  res.json({ ok: true });
+});
+
+app.post("/api/pdf-folder", auth, (req, res) => {
+  pdfFolderUpload.array("files", 500)(req, res, err => {
+    if (err) return res.status(400).json({ error: err.message || "PDF folder upload failed." });
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: "No files uploaded." });
+    const folderId = req.pdfFolderId;
+    if (!folderId) return res.status(500).json({ error: "Folder ID could not be determined." });
+
+    const folderPath = path.join(__dirname, "uploads", "pdf-folders", folderId);
+    let extractedPdfNames = [];
+
+    // Extract any ZIP files found, pull out PDFs
+    for (const file of files) {
+      if (/\.zip$/i.test(file.originalname)) {
+        try {
+          const zip = new AdmZip(file.path);
+          const entries = zip.getEntries();
+          for (const entry of entries) {
+            if (!entry.isDirectory && /\.pdf$/i.test(entry.entryName)) {
+              const pdfName = path.basename(entry.entryName);
+              const destPath = path.join(folderPath, pdfName);
+              zip.extractEntryTo(entry, folderPath, false, true);
+              extractedPdfNames.push(pdfName);
+            }
+          }
+        } catch (e) {
+          console.error("ZIP extraction error:", e);
+        }
+        // Remove the ZIP file after extraction
+        fs.unlink(file.path, () => {});
+      }
+    }
+
+    // Collect all PDF filenames now in the folder (directly uploaded + extracted from ZIP)
+    let allPdfNames = [];
+    try {
+      allPdfNames = fs.readdirSync(folderPath).filter(f => /\.pdf$/i.test(f));
+    } catch {}
+
+    if (!allPdfNames.length) {
+      return res.status(400).json({ error: "No PDF files found. Upload PDF files or a ZIP containing PDFs." });
+    }
+
+    res.json({
+      ok: true,
+      folderId,
+      fileCount: allPdfNames.length,
+      filenames: allPdfNames
+    });
+  });
+});
+
+app.delete("/api/pdf-folder/:folderId", auth, (req, res) => {
+  const folderId = req.params.folderId;
+  if (!folderId || folderId.includes("..") || !folderId.startsWith("pf-")) {
+    return res.status(400).json({ error: "Invalid folder ID." });
+  }
+  const folderPath = path.join(__dirname, "uploads", "pdf-folders", folderId);
+  fs.rm(folderPath, { recursive: true, force: true }, () => {});
+  res.json({ ok: true });
+});
+
+
+
+app.post("/api/test-smtp", auth, async (req, res) => {
+  try {
+    const transporter = getTransporter();
+    await transporter.verify();
+    res.json({ ok: true, message: "SMTP connection and authentication are working." });
+  } catch (e) {
+    res.status(400).json({ error: `SMTP check failed: ${e.message}` });
+  }
+});
+
+app.post("/api/test-email", auth, async (req, res) => {
+  const { to, subject, body, sampleName = "there", attachmentIds = [], senderType } = req.body || {};
+
+  if (!to || !validEmail(to)) {
+    return res.status(400).json({ error: "Enter a valid test email address." });
+  }
+  if (!subject || !body) {
+    return res.status(400).json({ error: "Subject and message body are required." });
+  }
+
+  const renderedSubject = String(subject).replaceAll("{{name}}", sampleName);
+  const renderedBody = String(body)
+    .replaceAll("{{name}}", sampleName)
+    .replaceAll("{{email}}", to);
+
+  const testAttachments = getAttachmentRecords(attachmentIds);
+  const msTokens = getSetting("ms_tokens");
+  const isMsConnected = Boolean(msTokens);
+  const useMicrosoft = senderType === "microsoft" || (!senderType && isMsConnected);
+
+  try {
+    if (useMicrosoft) {
+      const result = await sendMailViaMicrosoftGraph({
+        to,
+        subject: renderedSubject,
+        body: renderedBody,
+        attachments: testAttachments
+      });
+      return res.json({
+        ok: true,
+        message: `Test email sent successfully via Microsoft Outlook to ${to}.`
+      });
+    } else {
+      const transporter = getTransporter();
+      const info = await transporter.sendMail(buildSmtpMailOptions({
+        to,
+        subject: renderedSubject,
+        body: renderedBody,
+        attachments: testAttachments
+      }));
+
+      return res.json({
+        ok: true,
+        message: `Test email accepted by SMTP. Message ID: ${info.messageId || "created"}`
+      });
+    }
+  } catch (e) {
+    res.status(400).json({ error: `Test email failed: ${e.message}` });
+  }
+});
+
+app.post("/api/campaigns", auth, (req, res) => {
+  const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds } = req.body || {};
+
+  if (!subject || !body) {
+    return res.status(400).json({ error: "Subject and message body are required." });
+  }
+
+  // Validate delay: between 1s and 600s
+  const cleanDelay = Math.max(1, Math.min(600, Number.isFinite(Number(delaySeconds)) ? Number(delaySeconds) : 5));
+
+
+  let contacts = getContacts();
+
+  if (Array.isArray(selectedIds) && selectedIds.length) {
+    const ids = new Set(selectedIds.map(Number));
+    contacts = contacts.filter(c => ids.has(c.id));
+  }
+
+  if (!contacts.length) return res.status(400).json({ error: "No recipients selected." });
+  if (contacts.length > MAX) {
+    return res.status(400).json({ error: `Campaign exceeds the configured limit of ${MAX} recipients.` });
+  }
+
+  // Validate pdfFolderId if provided
+  const cleanPdfFolderId = (pdfFolderId && String(pdfFolderId).startsWith("pf-") && !String(pdfFolderId).includes(".."))
+    ? String(pdfFolderId) : null;
+
+  const pdfFolderPath = cleanPdfFolderId
+    ? path.join(__dirname, "uploads", "pdf-folders", cleanPdfFolderId)
+    : null;
+
+  const usePdfFolder = Boolean(pdfFolderPath && fs.existsSync(pdfFolderPath));
+
+  const msEmail = getSetting("ms_account_email") || "";
+  const isMsConnected = Boolean(getSetting("ms_tokens"));
+  const finalSenderType = senderType || (isMsConnected ? "microsoft" : "smtp");
+  const finalSenderEmail = finalSenderType === "microsoft" ? msEmail : (process.env.MAIL_FROM || process.env.SMTP_USER || "");
+
+  const create = db.prepare(`
+    INSERT INTO campaigns (name,subject,body,total,sender_type,sender_email,pdf_folder_id,skipped,delay_seconds)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `);
+
+  const insert = db.prepare(`
+    INSERT INTO campaign_recipients
+    (campaign_id,contact_id,name,email,rendered_subject,rendered_body,status,pdf_match_status)
+    VALUES (?,?,?,?,?,?,?,?)
+  `);
+
+  let matchedCount = 0;
+  let skippedCount = 0;
+
+  const campaignId = db.transaction(() => {
+    const id = create.run(
+      String(name || "Untitled Campaign"),
+      String(subject),
+      String(body),
+      contacts.length,
+      finalSenderType,
+      finalSenderEmail,
+      cleanPdfFolderId || null,
+      0,
+      cleanDelay
+    ).lastInsertRowid;
+
+    for (const c of contacts) {
+      let status = "pending";
+      let pdfMatchStatus = "na";
+
+      if (usePdfFolder) {
+        const pdfPath = findPdfForRecipient(pdfFolderPath, c.name);
+        if (pdfPath) {
+          pdfMatchStatus = "matched";
+          matchedCount++;
+        } else {
+          status = "not_sent";
+          pdfMatchStatus = "skipped";
+          skippedCount++;
+        }
+      }
+
+      insert.run(
+        id,
+        c.id,
+        c.name,
+        c.email,
+        renderTemplate(subject, c),
+        renderTemplate(body, c),
+        status,
+        pdfMatchStatus
+      );
+    }
+
+    // Update skipped count on the campaign
+    if (skippedCount > 0) {
+      db.prepare("UPDATE campaigns SET skipped=? WHERE id=?").run(skippedCount, id);
+    }
+
+    return id;
+  })();
+
+  const cleanAttachmentIds = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(Number).filter(Number.isInteger))];
+  const linkAttachment = db.prepare("INSERT INTO campaign_attachments (campaign_id, attachment_id) VALUES (?,?)");
+  for (const attachmentId of cleanAttachmentIds) {
+    const exists = db.prepare("SELECT id FROM attachments WHERE id=?").get(attachmentId);
+    if (exists) linkAttachment.run(campaignId, attachmentId);
+  }
+
+  // Detect duplicate loan numbers among matched recipients (same loan number → same PDF sent twice)
+  const allMatched = db.prepare(`
+    SELECT name, GROUP_CONCAT(id) as ids, COUNT(*) as cnt
+    FROM campaign_recipients
+    WHERE campaign_id=? AND pdf_match_status='matched'
+    GROUP BY name
+    HAVING COUNT(*) > 1
+  `).all(campaignId);
+
+  const duplicates = allMatched.map(row => ({
+    loanNumber: row.name,
+    count: row.cnt,
+    recipientIds: row.ids.split(",").map(Number)
+  }));
+
+  res.json({
+    ok: true,
+    campaignId,
+    attachments: cleanAttachmentIds,
+    senderType: finalSenderType,
+    matchedCount: usePdfFolder ? matchedCount : null,
+    skippedCount: usePdfFolder ? skippedCount : null,
+    usedPdfFolder: usePdfFolder,
+    duplicates  // array of {loanNumber, count, recipientIds} — empty if no duplicates
+  });
+});
+
+// Mark specific recipients as not_sent (denied duplicates) before sending
+app.post("/api/campaigns/:id/deny-duplicates", auth, (req, res) => {
+  const { recipientIds } = req.body || {};
+  if (!Array.isArray(recipientIds) || !recipientIds.length) {
+    return res.status(400).json({ error: "recipientIds array required." });
+  }
+
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  const markNotSent = db.prepare(`
+    UPDATE campaign_recipients
+    SET status='not_sent', pdf_match_status='skipped', error='Denied — duplicate loan number'
+    WHERE id=? AND campaign_id=?
+  `);
+
+  let denied = 0;
+  for (const rid of recipientIds.map(Number)) {
+    const r = markNotSent.run(rid, campaign.id);
+    if (r.changes) denied++;
+  }
+
+  // Update skipped count
+  db.prepare("UPDATE campaigns SET skipped=skipped+? WHERE id=?").run(denied, campaign.id);
+
+  res.json({ ok: true, denied });
+});
+
+
+app.post("/api/campaigns/:id/send", auth, async (req, res) => {
+  if (sendLock) return res.status(409).json({ error: "Another campaign is currently sending. Please wait." });
+
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  if (campaign.status === "sending") return res.status(409).json({ error: "Campaign is already sending." });
+  if (campaign.status === "completed") return res.status(400).json({ error: "Campaign already completed." });
+
+  const useMicrosoft = campaign.sender_type === "microsoft" || (!campaign.sender_type && Boolean(getSetting("ms_tokens")));
+
+  if (useMicrosoft) {
+    try {
+      await getValidMicrosoftAccessToken();
+    } catch (e) {
+      return res.status(400).json({ error: `Microsoft Outlook error: ${e.message}` });
+    }
+  } else {
+    try {
+      getTransporter();
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
+
+  sendLock = true;
+
+  db.prepare(`
+    UPDATE campaigns
+    SET status='sending', started_at=CURRENT_TIMESTAMP, sent=0, failed=0
+    WHERE id=?
+  `).run(campaign.id);
+
+  // Only reset recipients that are actually pending — leave 'not_sent' (skipped) ones untouched
+  db.prepare(`
+    UPDATE campaign_recipients
+    SET status='pending', error='', sent_at=NULL
+    WHERE campaign_id=? AND pdf_match_status != 'skipped'
+  `).run(campaign.id);
+
+  res.json({ ok: true, message: "Campaign sending started.", campaignId: campaign.id });
+
+
+  setImmediate(async () => {
+    try {
+      let transporter = null;
+      if (!useMicrosoft) {
+        transporter = getTransporter();
+      }
+
+      const pending = db.prepare(`
+        SELECT *
+        FROM campaign_recipients
+        WHERE campaign_id=? AND status='pending'
+        ORDER BY id
+      `).all(campaign.id);
+
+      for (const recipient of pending) {
+        try {
+          // Global attachments — same for every recipient
+          const globalAttachments = db.prepare(`
+            SELECT a.original_name, a.file_path, a.mime_type
+            FROM campaign_attachments ca
+            JOIN attachments a ON a.id=ca.attachment_id
+            WHERE ca.campaign_id=?
+          `).all(campaign.id).filter(a => fs.existsSync(a.file_path)).map(a => ({
+            filename: a.original_name,
+            original_name: a.original_name,
+            path: a.file_path,
+            file_path: a.file_path,
+            contentType: a.mime_type,
+            mime_type: a.mime_type
+          }));
+
+          // Personal PDF — matched by recipient name from the pdf folder
+          const personalAttachments = [];
+          if (campaign.pdf_folder_id) {
+            const pdfFolderPath = path.join(__dirname, "uploads", "pdf-folders", campaign.pdf_folder_id);
+            const personalPdfPath = findPdfForRecipient(pdfFolderPath, recipient.name);
+            if (personalPdfPath && fs.existsSync(personalPdfPath)) {
+              personalAttachments.push({
+                filename: path.basename(personalPdfPath),
+                original_name: path.basename(personalPdfPath),
+                path: personalPdfPath,
+                file_path: personalPdfPath,
+                contentType: "application/pdf",
+                mime_type: "application/pdf"
+              });
+            }
+          }
+
+          const allAttachments = [...personalAttachments, ...globalAttachments];
+
+
+          let successNote = "";
+
+          if (useMicrosoft) {
+            const graphResult = await sendMailViaMicrosoftGraph({
+              to: recipient.email,
+              subject: recipient.rendered_subject,
+              body: recipient.rendered_body,
+              attachments: allAttachments
+            });
+            successNote = `Sent via Microsoft Outlook (${graphResult.messageId || "Accepted"})`;
+          } else {
+            const info = await transporter.sendMail(buildSmtpMailOptions({
+              to: recipient.email,
+              subject: recipient.rendered_subject,
+              body: recipient.rendered_body,
+              attachments: allAttachments
+            }));
+            successNote = `SMTP accepted. Message ID: ${info.messageId || "created"}`;
+          }
+
+
+          db.prepare(`
+            UPDATE campaign_recipients
+            SET status='sent', sent_at=CURRENT_TIMESTAMP, error=?
+            WHERE id=?
+          `).run(successNote, recipient.id);
+
+          db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
+        } catch (e) {
+          db.prepare(`
+            UPDATE campaign_recipients
+            SET status='failed', error=?
+            WHERE id=?
+          `).run(String(e.message || e).slice(0, 1000), recipient.id);
+
+          db.prepare("UPDATE campaigns SET failed=failed+1 WHERE id=?").run(campaign.id);
+        }
+
+        // Use campaign-specific delay (set by user in compose page)
+        const delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+
+      }
+
+      db.prepare(`
+        UPDATE campaigns
+        SET status='completed', completed_at=CURRENT_TIMESTAMP
+        WHERE id=?
+      `).run(campaign.id);
+    } catch (e) {
+      db.prepare(`
+        UPDATE campaigns
+        SET status='failed', completed_at=CURRENT_TIMESTAMP
+        WHERE id=?
+      `).run(campaign.id);
+    } finally {
+      sendLock = false;
+    }
+  });
+});
+
+app.get("/api/campaigns", auth, (req, res) => {
+  res.json(db.prepare(`
+    SELECT *
+    FROM campaigns
+    ORDER BY id DESC
+  `).all());
+});
+
+app.get("/api/campaigns/:id", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  const recipients = db.prepare(`
+    SELECT id,name,email,status,error,sent_at,pdf_match_status
+    FROM campaign_recipients
+    WHERE campaign_id=?
+    ORDER BY id
+  `).all(req.params.id);
+
+  const attachments = db.prepare(`
+    SELECT a.id, a.original_name, a.mime_type, a.size
+    FROM campaign_attachments ca
+    JOIN attachments a ON a.id=ca.attachment_id
+    WHERE ca.campaign_id=?
+    ORDER BY ca.id
+  `).all(req.params.id);
+
+  res.json({ campaign, recipients, attachments });
+});
+
+// Download skipped (not sent) contacts as Excel
+app.get("/api/campaigns/:id/skipped/export", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  const skipped = db.prepare(`
+    SELECT cr.name, cr.email,
+           c.number, c.details
+    FROM campaign_recipients cr
+    LEFT JOIN contacts c ON c.id = cr.contact_id
+    WHERE cr.campaign_id=? AND cr.pdf_match_status='skipped'
+    ORDER BY cr.id
+  `).all(req.params.id);
+
+  if (!skipped.length) {
+    return res.status(404).json({ error: "No skipped contacts found for this campaign." });
+  }
+
+  const wsData = [
+    ["Name", "Email", "Phone", "Details"],
+    ...skipped.map(r => [r.name || "", r.email || "", r.number || "", r.details || ""])
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  XLSX.utils.book_append_sheet(wb, ws, "Not Sent");
+
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  const filename = `not-sent-${campaign.name.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}-${campaign.id}.xlsx`;
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
+});
+
+app.get("/api/campaigns/:id/progress", auth, (req, res) => {
+  const c = db.prepare(`
+    SELECT id,name,status,total,sent,failed,skipped,started_at,completed_at
+    FROM campaigns
+    WHERE id=?
+  `).get(req.params.id);
+
+  if (!c) return res.status(404).json({ error: "Campaign not found." });
+  res.json(c);
+});
+
+// Full campaign report: Sent + Undeliverable as two Excel sheets
+app.get("/api/campaigns/:id/report", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  const allRecipients = db.prepare(`
+    SELECT cr.name, cr.email, cr.status, cr.error, cr.sent_at,
+           c.number, c.details, c.extra_json
+    FROM campaign_recipients cr
+    LEFT JOIN contacts c ON c.id = cr.contact_id
+    WHERE cr.campaign_id=?
+    ORDER BY cr.id
+  `).all(req.params.id);
+
+  const sentRows = allRecipients.filter(r => r.status === "sent");
+  const undeliverableRows = allRecipients.filter(r => r.status === "failed" || r.status === "not_sent");
+
+  const toRow = r => {
+    let extras = {};
+    try { extras = JSON.parse(r.extra_json || "{}"); } catch {}
+    return [r.name || "", r.email || "", r.number || "", r.details || "",
+            Object.values(extras).join(" | "), r.sent_at || "", r.error || ""];
+  };
+
+  const hdr = ["Loan Number", "Email", "Phone", "Details", "Extra", "Sent At", "Note"];
+
+  const wb = XLSX.utils.book_new();
+
+  const wsSent = XLSX.utils.aoa_to_sheet([hdr, ...sentRows.map(toRow)]);
+  XLSX.utils.book_append_sheet(wb, wsSent, "Sent Items");
+
+  const wsUndel = XLSX.utils.aoa_to_sheet([hdr, ...undeliverableRows.map(toRow)]);
+  XLSX.utils.book_append_sheet(wb, wsUndel, "Undeliverable");
+
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  const filename = `report-${campaign.name.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}-${campaign.id}.xlsx`;
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
+});
+
+
+// Templates CRUD
+app.get("/api/templates", auth, (req, res) => {
+  res.json(db.prepare("SELECT id, name, subject, body, created_at FROM templates ORDER BY id DESC").all());
+});
+
+app.post("/api/templates", auth, (req, res) => {
+  const { name, subject, body } = req.body || {};
+  if (!name || !subject || !body) return res.status(400).json({ error: "Name, subject and body are required." });
+  const id = db.prepare("INSERT INTO templates (name, subject, body) VALUES (?, ?, ?)").run(
+    String(name).trim().slice(0, 100),
+    String(subject).trim(),
+    String(body).trim()
+  ).lastInsertRowid;
+  const t = db.prepare("SELECT * FROM templates WHERE id=?").get(id);
+  res.json({ ok: true, template: t });
+});
+
+app.delete("/api/templates/:id", auth, (req, res) => {
+  const t = db.prepare("SELECT id FROM templates WHERE id=?").get(req.params.id);
+  if (!t) return res.status(404).json({ error: "Template not found." });
+  db.prepare("DELETE FROM templates WHERE id=?").run(t.id);
+  res.json({ ok: true });
+});
+
+// Express 5 compatible SPA fallback: do not use app.get("*").
+app.use((req, res, next) => {
+  if (req.method === "GET" && !req.path.startsWith("/api/")) {
+    return res.sendFile(path.join(__dirname, "public", "index.html"));
+  }
+  next();
+});
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(400).json({ error: err.message || "Request failed." });
+});
+
+app.listen(PORT, () => {
+  console.log(`SmartMail Pro running at http://localhost:${PORT}`);
+  console.log(`SMTP configured: ${Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)}`);
+});

@@ -1,0 +1,20 @@
+{
+  "name": "smartmail-pro",
+  "version": "3.1.0",
+  "description": "Professional Excel-to-personalized-email campaign manager with file and photo attachments.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.5",
+    "xlsx": "^0.18.5"
+  }
+}

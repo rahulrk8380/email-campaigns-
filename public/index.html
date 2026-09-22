@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartMail Pro — Email Automation</title>
+  <meta name="theme-color" content="#171c2e">
+  <meta name="description" content="Professional Excel-to-email automation with personalization, attachments and campaign tracking.">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <section id="loginView" class="login-shell">
+    <div class="login-card">
+      <div class="brand large">
+        <div class="brand-mark">S</div>
+        <div>
+          <strong>SmartMail</strong>
+          <span>Professional email automation</span>
+        </div>
+      </div>
+      <h1>Welcome back</h1>
+      <p class="muted">Sign in to manage contacts and send personalized campaigns.</p>
+      <form id="loginForm">
+        <label>Email
+          <input id="loginEmail" type="email" value="rahul@gmail.com" required>
+        </label>
+        <label>Password
+          <input id="loginPassword" type="password" value="hi" required>
+        </label>
+        <button class="btn primary full" type="submit">Sign in</button>
+        <div id="loginError" class="form-error"></div>
+      </form>
+      <div class="login-note">Local app • Your SMTP credentials stay in your <code>.env</code> file.</div>
+    </div>
+  </section>
+
+  <div id="mainView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">S</div>
+        <div>
+          <strong>SmartMail</strong>
+          <span>Pro</span>
+        </div>
+      </div>
+
+      <nav>
+        <button class="nav active" data-page="dashboard"><span>⌂</span> Dashboard</button>
+        <button class="nav" data-page="contacts"><span>♙</span> Contacts</button>
+        <button class="nav" data-page="compose"><span>✎</span> Compose</button>
+        <button class="nav" data-page="campaigns"><span>◷</span> Campaign History</button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div id="msStatusPill" class="smtp-pill ms-pill" onclick="openMsModal()" title="Click to configure or connect Microsoft Outlook">
+          <span class="dot ms-dot"></span> <span id="msStatusText">Outlook: Connecting...</span>
+        </div>
+        <div id="smtpStatusPill" class="smtp-pill small-pill"><span class="dot"></span> SMTP fallback</div>
+        <button id="logoutBtn" class="nav logout"><span>↪</span> Logout</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">EMAIL AUTOMATION</div>
+          <h2 id="pageTitle">Dashboard</h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="switch-mail-btn" onclick="openSmtpOtpModal()" title="Switch the Outlook account used for sending">
+            <span>⇄</span> Switch Mail
+            <span id="activeSenderTag" class="active-sender-tag hidden"></span>
+          </button>
+          <div class="user-pill" id="userPill">admin@example.com</div>
+        </div>
+      </header>
+
+      <section id="dashboardPage" class="page">
+        <div class="hero">
+          <div>
+            <div class="hero-label">SMARTMAIL WORKFLOW</div>
+            <h1>Upload → Personalize → Test → Send</h1>
+            <p>Turn an Excel contact list into professional, personalized email campaigns in minutes.</p>
+            <button class="btn light" onclick="showPage('contacts')">Import contacts →</button>
+          </div>
+          <div class="hero-art">
+            <div class="mail-card"><span>✉</span><b>3,250</b><small>emails ready</small></div>
+            <div class="mail-card second"><span>✓</span><b>98%</b><small>SMTP accepted</small></div>
+          </div>
+        </div>
+
+        <div class="stats">
+          <div class="stat-card"><span>Contacts</span><strong id="statContacts">0</strong><small>Current list</small></div>
+          <div class="stat-card"><span>Campaigns</span><strong id="statCampaigns">0</strong><small>Total created</small></div>
+          <div class="stat-card"><span>Sent</span><strong id="statSent">0</strong><small>Accepted by SMTP</small></div>
+          <div class="stat-card"><span>Failed</span><strong id="statFailed">0</strong><small>Need attention</small></div>
+        </div>
+
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-head"><div><h3>How it works</h3><p>Simple enough for first-time users, powerful enough for campaigns.</p></div></div>
+            <div class="steps">
+              <div><b>01</b><span><strong>Upload</strong> Excel, CSV or XLS with Name and Email.</span></div>
+              <div><b>02</b><span><strong>Write once</strong> and personalize with variables.</span></div>
+              <div><b>03</b><span><strong>Test</strong> your message before sending.</span></div>
+              <div><b>04</b><span><strong>Send</strong> to selected contacts and track each result.</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><div><h3>Supported variables</h3><p>Use Excel data inside your subject and message.</p></div></div>
+            <div class="chips">
+              <span>{{name}}</span><span>{{email}}</span><span>{{number}}</span><span>{{details}}</span><span>{{your_column}}</span>
+            </div>
+            <div class="info-box">Extra Excel columns are automatically available by their column name.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="contactsPage" class="page hidden">
+        <div class="page-intro">
+          <div><h3>Contacts</h3><p>Upload a spreadsheet and choose exactly who should receive your campaign.</p></div>
+          <div class="intro-actions">
+            <button class="btn outline" onclick="clearContacts()">Clear list</button>
+            <button class="btn primary" onclick="showPage('compose')">Compose email →</button>
+          </div>
+        </div>
+
+        <div class="panel upload-panel">
+          <div class="panel-head"><div><h3>Upload Excel</h3><p>Accepted: .xlsx, .xls, .csv • maximum 10 MB</p></div></div>
+          <div id="dropzone" class="dropzone">
+            <div class="upload-icon">↑</div>
+            <strong>Drop your Excel file here</strong>
+            <span>or click to browse</span>
+            <input id="excelInput" type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+          <div id="uploadResult" class="upload-result"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div><h3>Contact preview</h3><p id="contactCount">0 contacts</p></div>
+            <label class="select-all"><input id="selectAll" type="checkbox" checked> Select all</label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th></th><th>#</th><th>Loan Number</th><th>Email</th><th>Phone</th><th>Branch</th><th>Details</th><th>Status</th></tr></thead>
+              <tbody id="contactsTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="composePage" class="page hidden">
+        <div class="page-intro">
+          <div><h3>Compose campaign</h3><p>Write one message and SmartMail personalizes it for every selected recipient.</p></div>
+          <div class="recipient-summary"><span id="selectedCount">0</span> recipients selected</div>
+        </div>
+
+        <div class="compose-grid">
+          <div class="panel compose-form">
+            <div class="sender-row">
+              <label>Send from (Sender Account)
+                <div class="sender-select-wrapper">
+                  <select id="senderSelect">
+                    <option value="microsoft">Microsoft Outlook (Checking...)</option>
+                  </select>
+                  <button type="button" class="btn outline small-btn" onclick="openMsModal()" title="Configure Outlook credentials or switch accounts">⚙ Outlook Settings</button>
+                </div>
+              </label>
+            </div>
+
+            <label>Campaign name
+              <input id="campaignName" placeholder="e.g. Internship Update">
+            </label>
+            <label>Subject
+              <input id="subject" placeholder="Hello {{name}} — Important Update">
+            </label>
+            <label>Message body
+              <textarea id="body" rows="11" placeholder="Hi {{name}},&#10;&#10;Write your message here...&#10;&#10;Regards,&#10;Your Team"></textarea>
+            </label>
+
+            <div class="variable-bar">
+              <span>Insert:</span>
+              <button onclick="insertVar('{{name}}')">{{name}}</button>
+              <button onclick="insertVar('{{email}}')">{{email}}</button>
+              <button onclick="insertVar('{{number}}')">{{number}}</button>
+              <button onclick="insertVar('{{details}}')">{{details}}</button>
+              <button onclick="insertVar('{{branch}}')">{{branch}}</button>
+            </div>
+
+            <!-- Personal PDFs: one PDF per recipient, matched by loan number -->
+            <div class="attachment-box personal-pdf-box">
+              <div class="attachment-head">
+                <div>
+                  <strong>📂 Personal PDFs <span class="badge-required">Per Recipient</span></strong>
+                  <span>PDF must be named after the recipient's <b>Loan Number</b> (e.g. LN12345.pdf). Contacts without a matching PDF will be <b>skipped</b>. Accept: individual PDFs, a folder, or a ZIP file.</span>
+                </div>
+              </div>
+              <div class="upload-mode-btns">
+                <label class="upload-mode-btn" for="pdfFolderInput" title="Select individual PDF files">
+                  📄 Select PDFs
+                  <input id="pdfFolderInput" type="file" multiple accept=".pdf" hidden>
+                </label>
+                <label class="upload-mode-btn" for="pdfFolderDirInput" title="Select a folder — all PDFs inside will be used">
+                  📁 Select Folder
+                  <input id="pdfFolderDirInput" type="file" multiple webkitdirectory hidden>
+                </label>
+                <label class="upload-mode-btn" for="pdfFolderZipInput" title="Upload a ZIP file containing PDFs">
+                  🗜 Upload ZIP
+                  <input id="pdfFolderZipInput" type="file" accept=".zip" hidden>
+                </label>
+              </div>
+              <div id="pdfFolderDropzone" class="attachment-dropzone pdf-folder-dropzone" style="margin-top:8px">
+                Drop PDFs, a folder, or a ZIP here
+              </div>
+              <div id="pdfFolderStatus" class="pdf-folder-status hidden"></div>
+            </div>
+
+            <!-- Global Attachment: optional common file for every sent email -->
+            <div class="attachment-box">
+              <div class="attachment-head">
+                <div>
+                  <strong>📎 Global Attachment <span class="badge-optional">Optional</span></strong>
+                  <span>This file will be attached to every sent email. Leave empty if not needed.</span>
+                </div>
+                <label class="btn outline attach-btn" for="attachmentInput">+ Add file</label>
+                <input id="attachmentInput" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.jpg,.jpeg,.png,.gif,.webp,.zip" hidden>
+              </div>
+              <div id="attachmentDropzone" class="attachment-dropzone">Drop file here or click <b>Add file</b> · Max 8 files, 15 MB each, 24 MB total</div>
+              <div id="attachmentList" class="attachment-list"></div>
+            </div>
+
+
+            <div class="compose-recipients-panel">
+              <div class="compose-recipients-head">
+                <div>
+                  <strong>Recipients for this campaign</strong>
+                  <span id="composeRecipientsSubtitle">0 selected</span>
+                </div>
+                <div class="compose-recipients-actions">
+                  <input id="composeSearchInput" type="text" placeholder="Search contacts..." class="compose-search">
+                  <button type="button" class="btn outline small-btn" onclick="selectComposeRecipients(true)">Select All</button>
+                  <button type="button" class="btn outline small-btn" onclick="selectComposeRecipients(false)">Deselect All</button>
+                </div>
+              </div>
+              <div class="compose-recipients-table-wrap">
+                <table class="compose-recipients-table">
+                  <thead>
+                    <tr>
+                      <th style="width:36px"></th>
+                      <th style="width:40px">#</th>
+                      <th>Loan Number</th>
+                      <th>Email</th>
+                      <th>Branch</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="composeRecipientsTbody">
+                    <tr><td colspan="5" class="empty">No contacts uploaded yet. Upload in Contacts tab.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="template-panel">
+              <div class="template-panel-head">
+                <strong>💾 Templates</strong>
+                <div class="template-actions">
+                  <select id="templateSelect" class="template-select">
+                    <option value="">— Load a saved template —</option>
+                  </select>
+                  <button type="button" class="btn outline small-btn" onclick="loadTemplate()">Load</button>
+                  <button type="button" class="btn outline small-btn" onclick="saveTemplate()">Save Current</button>
+                </div>
+              </div>
+              <div id="templateList" class="template-list"></div>
+            </div>
+
+            <!-- Send Timer — mandatory delay between emails -->
+            <div class="timer-panel">
+              <div class="timer-head">
+                <span>⏱ <strong>Delay between emails</strong> <span class="badge-required">Required</span></span>
+                <span class="timer-hint">Prevents spam filters — minimum 1 second</span>
+              </div>
+              <div class="timer-controls">
+                <input type="range" id="delaySlider" min="1" max="300" value="5" class="delay-slider">
+                <input type="number" id="delayInput" min="1" max="9999" value="5" class="delay-number-input">
+                <div class="unit-toggle">
+                  <button type="button" id="unitSec" class="unit-btn active" onclick="setDelayUnit('sec')">sec</button>
+                  <button type="button" id="unitMin" class="unit-btn" onclick="setDelayUnit('min')">min</button>
+                </div>
+              </div>
+              <div id="delayPreview" class="delay-preview">Each email will be sent 5 seconds apart</div>
+            </div>
+
+            <div class="compose-actions">
+              <button type="button" class="btn outline" id="checkSenderBtn" onclick="checkCurrentSender()">Check Connection</button>
+              <button type="button" class="btn outline" onclick="sendTest()">Send test email</button>
+              <button type="button" class="btn primary big" id="sendCampaignBtn" onclick="sendCampaignDirect()">Send to selected recipients <span>→</span></button>
+            </div>
+            <div id="actionMessage" class="action-message"></div>
+
+          </div>
+
+          <div class="panel preview-panel">
+            <div class="preview-head"><span>LIVE PREVIEW</span><span class="sample-tag">Sample: Arun</span></div>
+            <div class="email-preview">
+              <div class="preview-subject" id="previewSubject">Your subject</div>
+              <div class="preview-line"></div>
+              <div class="preview-body" id="previewBody">Your personalized message will appear here.</div>
+            </div>
+
+            <label>Test email address
+              <input id="testEmail" type="email" placeholder="your-email@gmail.com">
+            </label>
+            <p class="small muted">Test emails use the same SMTP configuration as campaigns.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="campaignsPage" class="page hidden">
+        <div class="page-intro">
+          <div><h3>Campaign History</h3><p>Track every campaign and inspect each recipient's delivery result.</p></div>
+          <button class="btn outline" onclick="refreshCampaigns()">↻ Refresh</button>
+        </div>
+
+        <div class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Campaign</th><th>Status</th><th>Total</th><th>Sent</th><th>Failed</th><th>Skipped</th><th>Created</th><th>Action</th></tr></thead>
+              <tbody id="campaignsTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="progressPanel" class="panel hidden">
+          <div class="panel-head">
+            <div><h3 id="progressTitle">Campaign details</h3><p id="progressMeta">Recipient-level results</p></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button id="downloadSkippedBtn" class="btn outline small-btn skipped-dl-btn hidden" onclick="downloadSkipped(currentCampaignId)">⬇ Not Sent (.xlsx)</button>
+              <button class="btn outline small-btn" onclick="downloadReport(currentCampaignId)">⬇ Full Report (.xlsx)</button>
+              <button class="btn outline small-btn" onclick="closeCampaignDetails()">Close</button>
+            </div>
+          </div>
+          <div class="progress"><div id="progressBar"></div></div>
+          <div class="progress-text" id="progressText">0 / 0</div>
+          <div id="skippedStat" class="skipped-stat hidden"></div>
+          <div id="campaignAttachments" class="campaign-attachments"></div>
+
+          <div class="table-wrap details-table">
+            <table>
+              <thead><tr><th>#</th><th>Loan Number</th><th>Email</th><th>Status</th><th>Error / SMTP message</th><th>Time</th></tr></thead>
+              <tbody id="recipientsTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
+    </main>
+  </div>
+
+  <!-- Microsoft Outlook Setup Modal -->
+  <!-- Email Sender Setup Modal — Simple OTP + Advanced OAuth tabs -->
+  <div id="msModal" class="modal-overlay hidden" onclick="if(event.target===this)closeMsModal()">
+    <div class="modal-card" style="max-width:460px">
+
+      <!-- Tabs -->
+      <div class="setup-tabs">
+        <button class="setup-tab active" id="tabDevice" onclick="switchSetupTab('device')">🔑 Outlook Sign In</button>
+        <button class="setup-tab" id="tabSimple" onclick="switchSetupTab('simple')">📧 App Password</button>
+        <button class="setup-tab" id="tabOauth" onclick="switchSetupTab('oauth')">⊞ OAuth</button>
+      </div>
+
+      <!-- ── DEVICE CODE TAB (recommended for Outlook) ── -->
+      <div id="setupDevice">
+        <div class="device-code-box" id="deviceStep1">
+          <div style="font-size:32px;text-align:center;margin-bottom:8px">⊞</div>
+          <h3 style="text-align:center;margin:0 0 6px">Sign in with Microsoft</h3>
+          <p style="text-align:center;font-size:11px;color:var(--muted);margin:0 0 16px">
+            No App Password needed. Just sign in with your normal Microsoft account.
+          </p>
+          <label style="margin-bottom:10px">Microsoft Client ID
+            <input id="deviceClientId" type="text" placeholder="Paste your Azure App Client ID">
+            <small style="font-size:9px;color:var(--muted);margin-top:3px;display:block">
+              Get from: <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Microsoft Entra → App registrations → your app → Application (client) ID</a>
+            </small>
+          </label>
+          <div id="deviceMsg" class="switch-mail-msg"></div>
+          <div style="display:flex;gap:10px;margin-top:14px">
+            <button type="button" class="btn outline" style="flex:1" onclick="closeMsModal()">Cancel</button>
+            <button type="button" class="btn primary" style="flex:2;background:linear-gradient(135deg,#0078d4,#106ebe)" onclick="startDeviceCodeFlow()">
+              Connect Outlook →
+            </button>
+          </div>
+        </div>
+
+        <!-- Code display step -->
+        <div id="deviceStep2" class="hidden">
+          <div style="text-align:center">
+            <div style="font-size:28px;margin-bottom:8px">🔐</div>
+            <h3 style="margin:0 0 6px">Open this link &amp; enter the code</h3>
+            <a id="deviceVerifyUrl" href="https://microsoft.com/devicelogin" target="_blank"
+               style="display:inline-block;font-size:12px;color:#0078d4;font-weight:800;margin-bottom:12px">
+              microsoft.com/devicelogin ↗
+            </a>
+            <div class="device-code-display" id="deviceUserCode">ABCD-EFGH</div>
+            <p style="font-size:11px;color:var(--muted);margin:10px 0">
+              Sign in with your Microsoft/Outlook account after entering the code.
+            </p>
+            <div id="devicePollMsg" class="switch-mail-msg" style="text-align:center">
+              ⏳ Waiting for you to sign in…
+            </div>
+            <button type="button" class="btn outline" style="margin-top:12px;width:100%" onclick="cancelDeviceFlow()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── SIMPLE TAB ── -->
+      <div id="setupSimple">
+        <p style="font-size:11px;color:var(--muted);margin:0 0 14px">Pick your provider and enter your <b>App Password</b> (NOT your regular login password).</p>
+
+        <div class="provider-row">
+          <button type="button" class="provider-btn active" id="provOutlook" onclick="pickProvider('outlook')"><span>⊞</span> Outlook</button>
+          <button type="button" class="provider-btn" id="provGmail" onclick="pickProvider('gmail')"><span>G</span> Gmail</button>
+          <button type="button" class="provider-btn" id="provYahoo" onclick="pickProvider('yahoo')"><span>Y</span> Yahoo</button>
+          <button type="button" class="provider-btn" id="provOther" onclick="pickProvider('other')"><span>✉</span> Other</button>
+        </div>
+
+        <div id="provOtherHost" class="hidden" style="margin-top:8px">
+          <label>SMTP Host<input id="smtpCustomHost" type="text" placeholder="e.g. smtp.yourdomain.com"></label>
+        </div>
+
+        <label style="margin-top:12px">Email Address
+          <input id="quickSmtpUser" type="email" placeholder="yourname@outlook.com" autocomplete="email">
+        </label>
+        <label style="margin-top:10px">App Password <span style="color:#ef4444;font-size:9px">(required — not your normal password)</span>
+          <input id="quickSmtpPass" type="password" placeholder="Paste your App Password here">
+        </label>
+
+        <!-- App Password guide — updated per provider by JS -->
+        <div id="appPwdGuide" class="app-pwd-guide">
+          <b id="appPwdGuideTitle">⚠ Outlook needs 3 things before SMTP works:</b>
+          <ol id="appPwdGuideSteps">
+            <li><b>Step 1 — Enable 2-Step verification:</b><br>
+              → <a href="https://account.microsoft.com/security" target="_blank">account.microsoft.com/security</a> → Turn on 2-step verification</li>
+            <li><b>Step 2 — Enable SMTP AUTH for your mailbox:</b><br>
+              → <a href="https://outlook.live.com/mail/options/mail/popimap" target="_blank">Outlook Settings → Mail → Sync email</a> → Enable <b>SMTP</b></li>
+            <li><b>Step 3 — Create an App Password:</b><br>
+              → <a href="https://account.microsoft.com/security" target="_blank">account.microsoft.com/security</a> → Advanced security → <b>App passwords</b> → Create new → copy &amp; paste above</li>
+          </ol>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #fed7aa">
+            💡 <b>Easier option:</b> Use <a href="#" onclick="pickProvider('gmail');return false" style="color:#c2410c;font-weight:800">Gmail instead</a> — just enable 2FA and create an App Password.
+          </div>
+        </div>
+
+        <div id="quickSmtpMsg" class="switch-mail-msg"></div>
+
+        <div style="display:flex;gap:10px;margin-top:16px">
+          <button type="button" class="btn outline" style="flex:1" onclick="closeMsModal()">Cancel</button>
+          <button type="button" class="btn primary" style="flex:2" onclick="quickSmtpSendOtp()">Send Code →</button>
+        </div>
+      </div>
+
+      <!-- ── ADVANCED / OAUTH TAB ── -->
+      <div id="setupOauth" class="hidden">
+        <div class="guide-box" style="margin-bottom:14px">
+          <div class="guide-title"><b>4-Step Microsoft App Setup:</b></div>
+          <ol>
+            <li>Open <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener"><b>Microsoft Entra App registrations ↗</b></a></li>
+            <li>Click <b>New registration</b> → Name: <code>SmartMail Pro</code> → Select <i>"Accounts in any organizational directory and personal Microsoft accounts"</i>.</li>
+            <li>Under Redirect URI: Select <b>Web</b> and set:
+              <div class="code-copy-row">
+                <code id="redirectUriDisplay">http://localhost:3000/auth/microsoft/callback</code>
+                <button type="button" class="mini-copy-btn" onclick="copyRedirectUri()">Copy</button>
+              </div>
+            </li>
+            <li>Under <b>API permissions</b> → Add: <code>Mail.Send</code>, <code>offline_access</code>, <code>User.Read</code>.</li>
+            <li>Under <b>Certificates &amp; secrets</b> → Create <b>New client secret</b> and copy the Value.</li>
+          </ol>
+        </div>
+
+        <div id="msConnectedBox" class="ms-connected-banner hidden">
+          <div class="ms-banner-content">
+            <span class="ms-badge">✓ Connected to Microsoft</span>
+            <strong id="msAccountEmail">user@outlook.com</strong>
+            <small id="msAccountName"></small>
+          </div>
+          <div class="ms-banner-actions">
+            <button type="button" class="btn outline small-btn" onclick="checkCurrentSender()">Verify</button>
+            <button type="button" class="btn outline small-btn danger" onclick="disconnectMicrosoft()">Disconnect</button>
+          </div>
+        </div>
+
+        <form id="msConfigForm" onsubmit="saveMsConfig(event)">
+          <label>Application (Client) ID
+            <input id="msClientId" type="text" placeholder="e.g. 11111111-2222-3333-4444-555555555555" required>
+          </label>
+          <label>Client Secret (Value)
+            <input id="msClientSecret" type="password" placeholder="Leave empty if already saved in .env">
+          </label>
+          <label>Tenant ID
+            <input id="msTenantId" type="text" value="common" placeholder="common">
+            <small class="muted">Use <code>common</code> for personal @outlook.com and work accounts.</small>
+          </label>
+          <div style="display:flex;gap:10px;margin-top:16px">
+            <button type="button" class="btn outline" style="flex:1" onclick="closeMsModal()">Cancel</button>
+            <button id="msSubmitBtn" type="submit" class="btn primary ms-btn" style="flex:2">Sign in with Microsoft ⊞</button>
+          </div>
+        </form>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Duplicate Loan Number Warning Modal -->
+  <div id="duplicateModal" class="modal-overlay hidden">
+    <div class="modal-card duplicate-modal-card">
+      <div class="modal-head">
+        <div class="modal-head-left">
+          <div class="brand-mark" style="background:linear-gradient(135deg,#f59e0b,#d97706);box-shadow:0 8px 20px rgba(245,158,11,.3)">⚠</div>
+          <div>
+            <h3>Duplicate Loan Numbers Detected</h3>
+            <p>Multiple contacts share the same loan number — the same PDF would be sent to more than one person.</p>
+          </div>
+        </div>
+      </div>
+      <div id="duplicateList" class="duplicate-list"></div>
+      <p class="duplicate-hint">Choose <b>Send All</b> to send to everyone, or <b>Deny Duplicates</b> to skip the extra contacts and move them to Undeliverable.</p>
+      <div class="modal-footer">
+        <button type="button" class="btn outline" onclick="handleDuplicates('send')">✓ Send All</button>
+        <button type="button" class="btn primary" style="background:linear-gradient(135deg,#f59e0b,#d97706);box-shadow:0 8px 18px rgba(245,158,11,.28)" onclick="handleDuplicates('deny')">⛔ Deny Duplicates → Move to Undeliverable</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Switch Mail Modal (Simple OTP) ══ -->
+  <div id="smtpOtpModal" class="modal-overlay hidden" onclick="if(event.target===this)closeSmtpOtpModal()">
+    <div class="modal-card switch-mail-card">
+
+      <!-- Step 1: Just email + password -->
+      <div id="smtpOtpStep1">
+        <h3 style="margin:0 0 4px">⇄ Switch Sender Email</h3>
+        <p style="font-size:11px;color:var(--muted);margin:0 0 18px">Enter your Outlook email and password — we'll send a code to verify.</p>
+
+        <label>Email
+          <input id="smtpUser" type="email" placeholder="yourname@outlook.com" autocomplete="email">
+        </label>
+        <label style="margin-top:10px">Password
+          <input id="smtpPass" type="password" placeholder="Your Outlook password or App Password">
+        </label>
+        <input type="hidden" id="smtpFromName" value="">
+
+        <div id="smtpOtpMsg1" class="switch-mail-msg"></div>
+
+        <div style="display:flex;gap:10px;margin-top:18px">
+          <button type="button" class="btn outline" style="flex:1" onclick="closeSmtpOtpModal()">Cancel</button>
+          <button type="button" class="btn primary" style="flex:2" onclick="smtpSendOtp()">Send Code →</button>
+        </div>
+      </div>
+
+      <!-- Step 2: OTP input -->
+      <div id="smtpOtpStep2" class="hidden">
+        <h3 style="margin:0 0 4px">📨 Enter the Code</h3>
+        <p style="font-size:11px;color:var(--muted);margin:0 0 18px">Check <b id="smtpOtpTargetEmail" style="color:var(--ink)"></b> — enter the 6-digit code below.</p>
+
+        <input id="smtpOtpCode" type="text" inputmode="numeric" maxlength="6"
+               placeholder="_ _ _ _ _ _" class="otp-code-input"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'')">
+
+        <div id="smtpOtpMsg2" class="switch-mail-msg"></div>
+
+        <div style="display:flex;gap:10px;margin-top:18px">
+          <button type="button" class="btn outline" style="flex:1" onclick="smtpOtpBack()">← Back</button>
+          <button type="button" class="btn primary" style="flex:2" onclick="smtpConfirmOtp()">✓ Verify & Switch</button>
+        </div>
+        <p style="text-align:center;font-size:10px;color:var(--muted);margin-top:12px">
+          No code? <a href="#" onclick="smtpOtpBack();return false" style="color:var(--primary)">Resend</a>
+        </p>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
