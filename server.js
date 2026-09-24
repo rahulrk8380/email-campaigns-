@@ -92,6 +92,7 @@ try { db.exec("ALTER TABLE campaigns ADD COLUMN pdf_folder_id TEXT DEFAULT NULL"
 try { db.exec("ALTER TABLE campaigns ADD COLUMN skipped INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE campaigns ADD COLUMN delay_seconds INTEGER DEFAULT 5"); } catch {}
 try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN pdf_match_status TEXT DEFAULT 'na'"); } catch {}
+try { db.prepare("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT").run(); } catch {}
 
 
 db.exec(`
@@ -775,106 +776,6 @@ app.post("/api/smtp-verify/confirm-otp", auth, (req, res) => {
 
 });
 
-// ── Microsoft Device Code Flow (sign in without App Password) ─────────────────
-let _deviceSessions = {}; // stateId → { device_code, clientId, tenantId }
-
-app.post("/api/microsoft/device-code/start", auth, async (req, res) => {
-  const clientId = getSetting("ms_client_id") || process.env.MS_CLIENT_ID;
-  const tenantId = getSetting("ms_tenant_id") || process.env.MS_TENANT_ID || "common";
-
-  if (!clientId) {
-    return res.status(400).json({
-      error: "Microsoft Client ID not set. Go to the '⊞ Microsoft OAuth' tab, enter your Client ID and save it first."
-    });
-  }
-
-  try {
-    const r = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/devicecode`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: clientId,
-        scope: "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access"
-      }).toString()
-    });
-
-    const data = await r.json();
-    if (!r.ok) return res.status(400).json({ error: data.error_description || "Failed to start sign-in." });
-
-    const stateId = crypto.randomBytes(8).toString("hex");
-    _deviceSessions[stateId] = { device_code: data.device_code, clientId, tenantId, interval: data.interval || 5 };
-
-    // Auto-cleanup after expiry
-    setTimeout(() => delete _deviceSessions[stateId], (data.expires_in || 900) * 1000);
-
-    res.json({
-      stateId,
-      user_code: data.user_code,
-      verification_uri: data.verification_uri || "https://microsoft.com/devicelogin",
-      expires_in: data.expires_in || 900
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/microsoft/device-code/poll", auth, async (req, res) => {
-  const { stateId } = req.body || {};
-  const state = _deviceSessions[stateId];
-  if (!state) return res.status(400).json({ error: "Session expired. Please start again." });
-
-  try {
-    const r = await fetch(`https://login.microsoftonline.com/${state.tenantId}/oauth2/v2.0/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: state.clientId,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: state.device_code
-      }).toString()
-    });
-
-    const data = await r.json();
-
-    if (data.error === "authorization_pending" || data.error === "slow_down") {
-      return res.json({ ready: false });
-    }
-
-    if (data.error) {
-      delete _deviceSessions[stateId];
-      return res.status(400).json({ error: data.error_description || data.error });
-    }
-
-    // ✅ Token received — get user's email
-    const userRes = await fetch("https://graph.microsoft.com/v1.0/me", {
-      headers: { Authorization: `Bearer ${data.access_token}` }
-    });
-    const user = await userRes.json();
-    const email = user.mail || user.userPrincipalName || "";
-
-    // Save token for use in campaigns (Graph API send)
-    setSetting("ms_access_token",  data.access_token);
-    setSetting("ms_refresh_token", data.refresh_token || "");
-    setSetting("ms_token_email",   email);
-    setSetting("ms_token_expiry",  String(Date.now() + (data.expires_in || 3600) * 1000));
-    setSetting("ms_client_id",     state.clientId);
-    setSetting("ms_tenant_id",     state.tenantId);
-
-    delete _deviceSessions[stateId];
-    res.json({ ready: true, email });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Save MS Client ID from UI (for device code flow)
-app.post("/api/microsoft/save-client", auth, (req, res) => {
-  const { clientId, tenantId } = req.body || {};
-  if (clientId) setSetting("ms_client_id", clientId);
-  if (tenantId) setSetting("ms_tenant_id", tenantId || "common");
-  res.json({ ok: true });
-});
-
 app.delete("/api/contacts", auth, (req, res) => {
   db.prepare("DELETE FROM contacts").run();
   res.json({ ok: true });
@@ -1121,6 +1022,7 @@ app.post("/api/test-email", auth, async (req, res) => {
 
 app.post("/api/campaigns", auth, (req, res) => {
   const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds } = req.body || {};
+  const scheduledAt = req.body.scheduledAt || null; // ISO datetime string
 
   if (!subject || !body) {
     return res.status(400).json({ error: "Subject and message body are required." });
@@ -1158,8 +1060,8 @@ app.post("/api/campaigns", auth, (req, res) => {
   const finalSenderEmail = finalSenderType === "microsoft" ? msEmail : (process.env.MAIL_FROM || process.env.SMTP_USER || "");
 
   const create = db.prepare(`
-    INSERT INTO campaigns (name,subject,body,total,sender_type,sender_email,pdf_folder_id,skipped,delay_seconds)
-    VALUES (?,?,?,?,?,?,?,?,?)
+    INSERT INTO campaigns (name,subject,body,total,sender_type,sender_email,pdf_folder_id,skipped,delay_seconds,scheduled_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
   `);
 
   const insert = db.prepare(`
@@ -1181,7 +1083,8 @@ app.post("/api/campaigns", auth, (req, res) => {
       finalSenderEmail,
       cleanPdfFolderId || null,
       0,
-      cleanDelay
+      cleanDelay,
+      scheduledAt
     ).lastInsertRowid;
 
     for (const c of contacts) {
@@ -1242,6 +1145,11 @@ app.post("/api/campaigns", auth, (req, res) => {
     recipientIds: row.ids.split(",").map(Number)
   }));
 
+  // If scheduledAt is set, do NOT start send loop — just return scheduled response
+  if (scheduledAt) {
+    return res.json({ campaignId, scheduled: true, scheduledAt });
+  }
+
   res.json({
     ok: true,
     campaignId,
@@ -1283,6 +1191,140 @@ app.post("/api/campaigns/:id/deny-duplicates", auth, (req, res) => {
 });
 
 
+// Reusable send function — used by the /send route and the scheduler
+async function sendCampaign(campaignId) {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(campaignId);
+  if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+
+  if (campaign.status === "sending" || campaign.status === "completed") return;
+
+  const useMicrosoft = campaign.sender_type === "microsoft" || (!campaign.sender_type && Boolean(getSetting("ms_tokens")));
+
+  sendLock = true;
+
+  db.prepare(`
+    UPDATE campaigns
+    SET status='sending', started_at=CURRENT_TIMESTAMP, sent=0, failed=0
+    WHERE id=?
+  `).run(campaign.id);
+
+  // Only reset recipients that are actually pending — leave 'not_sent' (skipped) ones untouched
+  db.prepare(`
+    UPDATE campaign_recipients
+    SET status='pending', error='', sent_at=NULL
+    WHERE campaign_id=? AND pdf_match_status != 'skipped'
+  `).run(campaign.id);
+
+  try {
+    let transporter = null;
+    if (!useMicrosoft) {
+      transporter = getTransporter();
+    }
+
+    const pending = db.prepare(`
+      SELECT *
+      FROM campaign_recipients
+      WHERE campaign_id=? AND status='pending'
+      ORDER BY id
+    `).all(campaign.id);
+
+    for (const recipient of pending) {
+      try {
+        // Global attachments — same for every recipient
+        const globalAttachments = db.prepare(`
+          SELECT a.original_name, a.file_path, a.mime_type
+          FROM campaign_attachments ca
+          JOIN attachments a ON a.id=ca.attachment_id
+          WHERE ca.campaign_id=?
+        `).all(campaign.id).filter(a => fs.existsSync(a.file_path)).map(a => ({
+          filename: a.original_name,
+          original_name: a.original_name,
+          path: a.file_path,
+          file_path: a.file_path,
+          contentType: a.mime_type,
+          mime_type: a.mime_type
+        }));
+
+        // Personal PDF — matched by recipient name from the pdf folder
+        const personalAttachments = [];
+        if (campaign.pdf_folder_id) {
+          const pdfFolderPath = path.join(__dirname, "uploads", "pdf-folders", campaign.pdf_folder_id);
+          const personalPdfPath = findPdfForRecipient(pdfFolderPath, recipient.name);
+          if (personalPdfPath && fs.existsSync(personalPdfPath)) {
+            personalAttachments.push({
+              filename: path.basename(personalPdfPath),
+              original_name: path.basename(personalPdfPath),
+              path: personalPdfPath,
+              file_path: personalPdfPath,
+              contentType: "application/pdf",
+              mime_type: "application/pdf"
+            });
+          }
+        }
+
+        const allAttachments = [...personalAttachments, ...globalAttachments];
+
+
+        let successNote = "";
+
+        if (useMicrosoft) {
+          const graphResult = await sendMailViaMicrosoftGraph({
+            to: recipient.email,
+            subject: recipient.rendered_subject,
+            body: recipient.rendered_body,
+            attachments: allAttachments
+          });
+          successNote = `Sent via Microsoft Outlook (${graphResult.messageId || "Accepted"})`;
+        } else {
+          const info = await transporter.sendMail(buildSmtpMailOptions({
+            to: recipient.email,
+            subject: recipient.rendered_subject,
+            body: recipient.rendered_body,
+            attachments: allAttachments
+          }));
+          successNote = `SMTP accepted. Message ID: ${info.messageId || "created"}`;
+        }
+
+
+        db.prepare(`
+          UPDATE campaign_recipients
+          SET status='sent', sent_at=CURRENT_TIMESTAMP, error=?
+          WHERE id=?
+        `).run(successNote, recipient.id);
+
+        db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
+      } catch (e) {
+        db.prepare(`
+          UPDATE campaign_recipients
+          SET status='failed', error=?
+          WHERE id=?
+        `).run(String(e.message || e).slice(0, 1000), recipient.id);
+
+        db.prepare("UPDATE campaigns SET failed=failed+1 WHERE id=?").run(campaign.id);
+      }
+
+      // Use campaign-specific delay (set by user in compose page)
+      const delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+
+    }
+
+    db.prepare(`
+      UPDATE campaigns
+      SET status='completed', completed_at=CURRENT_TIMESTAMP
+      WHERE id=?
+    `).run(campaign.id);
+  } catch (e) {
+    db.prepare(`
+      UPDATE campaigns
+      SET status='failed', completed_at=CURRENT_TIMESTAMP
+      WHERE id=?
+    `).run(campaign.id);
+  } finally {
+    sendLock = false;
+  }
+}
+
 app.post("/api/campaigns/:id/send", auth, async (req, res) => {
   if (sendLock) return res.status(409).json({ error: "Another campaign is currently sending. Please wait." });
 
@@ -1308,134 +1350,9 @@ app.post("/api/campaigns/:id/send", auth, async (req, res) => {
     }
   }
 
-  sendLock = true;
-
-  db.prepare(`
-    UPDATE campaigns
-    SET status='sending', started_at=CURRENT_TIMESTAMP, sent=0, failed=0
-    WHERE id=?
-  `).run(campaign.id);
-
-  // Only reset recipients that are actually pending — leave 'not_sent' (skipped) ones untouched
-  db.prepare(`
-    UPDATE campaign_recipients
-    SET status='pending', error='', sent_at=NULL
-    WHERE campaign_id=? AND pdf_match_status != 'skipped'
-  `).run(campaign.id);
-
   res.json({ ok: true, message: "Campaign sending started.", campaignId: campaign.id });
 
-
-  setImmediate(async () => {
-    try {
-      let transporter = null;
-      if (!useMicrosoft) {
-        transporter = getTransporter();
-      }
-
-      const pending = db.prepare(`
-        SELECT *
-        FROM campaign_recipients
-        WHERE campaign_id=? AND status='pending'
-        ORDER BY id
-      `).all(campaign.id);
-
-      for (const recipient of pending) {
-        try {
-          // Global attachments — same for every recipient
-          const globalAttachments = db.prepare(`
-            SELECT a.original_name, a.file_path, a.mime_type
-            FROM campaign_attachments ca
-            JOIN attachments a ON a.id=ca.attachment_id
-            WHERE ca.campaign_id=?
-          `).all(campaign.id).filter(a => fs.existsSync(a.file_path)).map(a => ({
-            filename: a.original_name,
-            original_name: a.original_name,
-            path: a.file_path,
-            file_path: a.file_path,
-            contentType: a.mime_type,
-            mime_type: a.mime_type
-          }));
-
-          // Personal PDF — matched by recipient name from the pdf folder
-          const personalAttachments = [];
-          if (campaign.pdf_folder_id) {
-            const pdfFolderPath = path.join(__dirname, "uploads", "pdf-folders", campaign.pdf_folder_id);
-            const personalPdfPath = findPdfForRecipient(pdfFolderPath, recipient.name);
-            if (personalPdfPath && fs.existsSync(personalPdfPath)) {
-              personalAttachments.push({
-                filename: path.basename(personalPdfPath),
-                original_name: path.basename(personalPdfPath),
-                path: personalPdfPath,
-                file_path: personalPdfPath,
-                contentType: "application/pdf",
-                mime_type: "application/pdf"
-              });
-            }
-          }
-
-          const allAttachments = [...personalAttachments, ...globalAttachments];
-
-
-          let successNote = "";
-
-          if (useMicrosoft) {
-            const graphResult = await sendMailViaMicrosoftGraph({
-              to: recipient.email,
-              subject: recipient.rendered_subject,
-              body: recipient.rendered_body,
-              attachments: allAttachments
-            });
-            successNote = `Sent via Microsoft Outlook (${graphResult.messageId || "Accepted"})`;
-          } else {
-            const info = await transporter.sendMail(buildSmtpMailOptions({
-              to: recipient.email,
-              subject: recipient.rendered_subject,
-              body: recipient.rendered_body,
-              attachments: allAttachments
-            }));
-            successNote = `SMTP accepted. Message ID: ${info.messageId || "created"}`;
-          }
-
-
-          db.prepare(`
-            UPDATE campaign_recipients
-            SET status='sent', sent_at=CURRENT_TIMESTAMP, error=?
-            WHERE id=?
-          `).run(successNote, recipient.id);
-
-          db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
-        } catch (e) {
-          db.prepare(`
-            UPDATE campaign_recipients
-            SET status='failed', error=?
-            WHERE id=?
-          `).run(String(e.message || e).slice(0, 1000), recipient.id);
-
-          db.prepare("UPDATE campaigns SET failed=failed+1 WHERE id=?").run(campaign.id);
-        }
-
-        // Use campaign-specific delay (set by user in compose page)
-        const delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-
-      }
-
-      db.prepare(`
-        UPDATE campaigns
-        SET status='completed', completed_at=CURRENT_TIMESTAMP
-        WHERE id=?
-      `).run(campaign.id);
-    } catch (e) {
-      db.prepare(`
-        UPDATE campaigns
-        SET status='failed', completed_at=CURRENT_TIMESTAMP
-        WHERE id=?
-      `).run(campaign.id);
-    } finally {
-      sendLock = false;
-    }
-  });
+  setImmediate(() => sendCampaign(campaign.id).catch(console.error));
 });
 
 app.get("/api/campaigns", auth, (req, res) => {
@@ -1520,7 +1437,7 @@ app.get("/api/campaigns/:id/report", auth, (req, res) => {
   if (!campaign) return res.status(404).json({ error: "Campaign not found." });
 
   const allRecipients = db.prepare(`
-    SELECT cr.name, cr.email, cr.status, cr.error, cr.sent_at,
+    SELECT cr.name AS loanNumber, cr.email, cr.status, cr.error, cr.sent_at,
            c.number, c.details, c.extra_json
     FROM campaign_recipients cr
     LEFT JOIN contacts c ON c.id = cr.contact_id
@@ -1528,28 +1445,43 @@ app.get("/api/campaigns/:id/report", auth, (req, res) => {
     ORDER BY cr.id
   `).all(req.params.id);
 
-  const sentRows = allRecipients.filter(r => r.status === "sent");
-  const undeliverableRows = allRecipients.filter(r => r.status === "failed" || r.status === "not_sent");
+  const sentRows     = allRecipients.filter(r => r.status === "sent");
+  const undelivRows  = allRecipients.filter(r => r.status === "failed" || r.status === "not_sent");
 
-  const toRow = r => {
-    let extras = {};
-    try { extras = JSON.parse(r.extra_json || "{}"); } catch {}
-    return [r.name || "", r.email || "", r.number || "", r.details || "",
-            Object.values(extras).join(" | "), r.sent_at || "", r.error || ""];
-  };
+  // ── Sent Items sheet ─────────────────────────────────────────────────────────
+  const sentHdr = ["Loan Number", "Email", "Phone", "Status", "Sent At"];
+  const sentData = sentRows.map(r => [
+    r.loanNumber || "—",
+    r.email      || "—",
+    r.number     || "—",
+    "✓ Sent",
+    r.sent_at ? new Date(r.sent_at).toLocaleString() : "—"
+  ]);
 
-  const hdr = ["Loan Number", "Email", "Phone", "Details", "Extra", "Sent At", "Note"];
+  // ── Undeliverable sheet ───────────────────────────────────────────────────────
+  const undelHdr = ["Loan Number", "Email", "Phone", "Status", "Failure Reason"];
+  const undelData = undelivRows.map(r => [
+    r.loanNumber || "—",
+    r.email      || "—",
+    r.number     || "—",
+    r.status === "not_sent" ? "Not Sent" : "Failed",
+    r.error      || "No matching PDF / manually denied"
+  ]);
 
   const wb = XLSX.utils.book_new();
 
-  const wsSent = XLSX.utils.aoa_to_sheet([hdr, ...sentRows.map(toRow)]);
+  const wsSent = XLSX.utils.aoa_to_sheet([sentHdr, ...sentData]);
+  // Style the header row bold-ish by setting column widths
+  wsSent["!cols"] = [18, 30, 14, 10, 22].map(w => ({ wch: w }));
   XLSX.utils.book_append_sheet(wb, wsSent, "Sent Items");
 
-  const wsUndel = XLSX.utils.aoa_to_sheet([hdr, ...undeliverableRows.map(toRow)]);
+  const wsUndel = XLSX.utils.aoa_to_sheet([undelHdr, ...undelData]);
+  wsUndel["!cols"] = [18, 30, 14, 14, 40].map(w => ({ wch: w }));
   XLSX.utils.book_append_sheet(wb, wsUndel, "Undeliverable");
 
   const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-  const filename = `report-${campaign.name.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}-${campaign.id}.xlsx`;
+  const safeName = (campaign.name || "campaign").replace(/[^a-z0-9]/gi, "_").slice(0, 40);
+  const filename = `report-${safeName}-${campaign.id}.xlsx`;
 
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -1597,4 +1529,24 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`SmartMail Pro running at http://localhost:${PORT}`);
   console.log(`SMTP configured: ${Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)}`);
+
+  // Auto-send scheduled campaigns
+  setInterval(() => {
+    try {
+      const now = new Date().toISOString();
+      const due = db.prepare(`
+        SELECT id FROM campaigns 
+        WHERE status = 'pending' 
+          AND scheduled_at IS NOT NULL 
+          AND scheduled_at <= ?
+      `).all(now);
+      for (const c of due) {
+        // Clear scheduled_at so it doesn't re-trigger
+        db.prepare("UPDATE campaigns SET scheduled_at = NULL WHERE id = ?").run(c.id);
+        setImmediate(() => sendCampaign(c.id).catch(console.error));
+        console.log(`[Scheduler] Auto-sending campaign ${c.id}`);
+      }
+    } catch(e) { console.error("Scheduler error:", e); }
+  }, 60 * 1000);
 });
+

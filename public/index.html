@@ -295,6 +295,20 @@
               <div id="delayPreview" class="delay-preview">Each email will be sent 5 seconds apart</div>
             </div>
 
+            <!-- Schedule Send -->
+            <div class="schedule-section">
+              <label class="schedule-toggle-label">
+                <input type="checkbox" id="scheduleToggle" onchange="toggleSchedule()"> 
+                <span>📅 Schedule send (send at a specific time)</span>
+              </label>
+              <div id="scheduleBox" class="hidden" style="margin-top:10px">
+                <label>Send Date & Time
+                  <input type="datetime-local" id="scheduledAt" style="font-size:12px">
+                </label>
+                <p style="font-size:10px;color:var(--muted);margin-top:4px">Campaign will be queued and sent automatically at this time.</p>
+              </div>
+            </div>
+
             <div class="compose-actions">
               <button type="button" class="btn outline" id="checkSenderBtn" onclick="checkCurrentSender()">Check Connection</button>
               <button type="button" class="btn outline" onclick="sendTest()">Send test email</button>
@@ -368,57 +382,12 @@
 
       <!-- Tabs -->
       <div class="setup-tabs">
-        <button class="setup-tab active" id="tabDevice" onclick="switchSetupTab('device')">🔑 Outlook Sign In</button>
-        <button class="setup-tab" id="tabSimple" onclick="switchSetupTab('simple')">📧 App Password</button>
-        <button class="setup-tab" id="tabOauth" onclick="switchSetupTab('oauth')">⊞ OAuth</button>
-      </div>
-
-      <!-- ── DEVICE CODE TAB (recommended for Outlook) ── -->
-      <div id="setupDevice">
-        <div class="device-code-box" id="deviceStep1">
-          <div style="font-size:32px;text-align:center;margin-bottom:8px">⊞</div>
-          <h3 style="text-align:center;margin:0 0 6px">Sign in with Microsoft</h3>
-          <p style="text-align:center;font-size:11px;color:var(--muted);margin:0 0 16px">
-            No App Password needed. Just sign in with your normal Microsoft account.
-          </p>
-          <label style="margin-bottom:10px">Microsoft Client ID
-            <input id="deviceClientId" type="text" placeholder="Paste your Azure App Client ID">
-            <small style="font-size:9px;color:var(--muted);margin-top:3px;display:block">
-              Get from: <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Microsoft Entra → App registrations → your app → Application (client) ID</a>
-            </small>
-          </label>
-          <div id="deviceMsg" class="switch-mail-msg"></div>
-          <div style="display:flex;gap:10px;margin-top:14px">
-            <button type="button" class="btn outline" style="flex:1" onclick="closeMsModal()">Cancel</button>
-            <button type="button" class="btn primary" style="flex:2;background:linear-gradient(135deg,#0078d4,#106ebe)" onclick="startDeviceCodeFlow()">
-              Connect Outlook →
-            </button>
-          </div>
-        </div>
-
-        <!-- Code display step -->
-        <div id="deviceStep2" class="hidden">
-          <div style="text-align:center">
-            <div style="font-size:28px;margin-bottom:8px">🔐</div>
-            <h3 style="margin:0 0 6px">Open this link &amp; enter the code</h3>
-            <a id="deviceVerifyUrl" href="https://microsoft.com/devicelogin" target="_blank"
-               style="display:inline-block;font-size:12px;color:#0078d4;font-weight:800;margin-bottom:12px">
-              microsoft.com/devicelogin ↗
-            </a>
-            <div class="device-code-display" id="deviceUserCode">ABCD-EFGH</div>
-            <p style="font-size:11px;color:var(--muted);margin:10px 0">
-              Sign in with your Microsoft/Outlook account after entering the code.
-            </p>
-            <div id="devicePollMsg" class="switch-mail-msg" style="text-align:center">
-              ⏳ Waiting for you to sign in…
-            </div>
-            <button type="button" class="btn outline" style="margin-top:12px;width:100%" onclick="cancelDeviceFlow()">Cancel</button>
-          </div>
-        </div>
+        <button class="setup-tab active" id="tabOauth" onclick="switchSetupTab('oauth')">⊞ Microsoft OAuth</button>
+        <button class="setup-tab" id="tabSimple" onclick="switchSetupTab('simple')">📧 Simple (App Password)</button>
       </div>
 
       <!-- ── SIMPLE TAB ── -->
-      <div id="setupSimple">
+      <div id="setupSimple" class="hidden">
         <p style="font-size:11px;color:var(--muted);margin:0 0 14px">Pick your provider and enter your <b>App Password</b> (NOT your regular login password).</p>
 
         <div class="provider-row">
@@ -439,20 +408,16 @@
           <input id="quickSmtpPass" type="password" placeholder="Paste your App Password here">
         </label>
 
-        <!-- App Password guide — updated per provider by JS -->
+        <!-- How to get App Password -->
         <div id="appPwdGuide" class="app-pwd-guide">
-          <b id="appPwdGuideTitle">⚠ Outlook needs 3 things before SMTP works:</b>
+          <b id="appPwdGuideTitle">How to get an Outlook App Password:</b>
           <ol id="appPwdGuideSteps">
-            <li><b>Step 1 — Enable 2-Step verification:</b><br>
-              → <a href="https://account.microsoft.com/security" target="_blank">account.microsoft.com/security</a> → Turn on 2-step verification</li>
-            <li><b>Step 2 — Enable SMTP AUTH for your mailbox:</b><br>
-              → <a href="https://outlook.live.com/mail/options/mail/popimap" target="_blank">Outlook Settings → Mail → Sync email</a> → Enable <b>SMTP</b></li>
-            <li><b>Step 3 — Create an App Password:</b><br>
-              → <a href="https://account.microsoft.com/security" target="_blank">account.microsoft.com/security</a> → Advanced security → <b>App passwords</b> → Create new → copy &amp; paste above</li>
+            <li>Go to <a href="https://account.microsoft.com/security" target="_blank">account.microsoft.com/security</a></li>
+            <li>Turn on <b>Two-step verification</b> (if not already on)</li>
+            <li>Go to <b>Advanced security options</b> → <b>App passwords</b></li>
+            <li>Click <b>Create a new app password</b> → copy it</li>
+            <li>Paste it in the Password field above</li>
           </ol>
-          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #fed7aa">
-            💡 <b>Easier option:</b> Use <a href="#" onclick="pickProvider('gmail');return false" style="color:#c2410c;font-weight:800">Gmail instead</a> — just enable 2FA and create an App Password.
-          </div>
         </div>
 
         <div id="quickSmtpMsg" class="switch-mail-msg"></div>
@@ -464,20 +429,27 @@
       </div>
 
       <!-- ── ADVANCED / OAUTH TAB ── -->
-      <div id="setupOauth" class="hidden">
+      <div id="setupOauth">
+
+        <!-- Warning if already has api:// in Client ID -->
+        <div id="oauthWarning" class="hidden" style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:11px;color:#b91c1c">
+          ⚠️ <b>Remove <code>api://</code> from Client ID.</b> Paste only the UUID part, e.g. <code>3f43945e-74c8-...</code>
+        </div>
+
         <div class="guide-box" style="margin-bottom:14px">
-          <div class="guide-title"><b>4-Step Microsoft App Setup:</b></div>
+          <div class="guide-title"><b>5-Step Microsoft OAuth Setup:</b></div>
           <ol>
             <li>Open <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener"><b>Microsoft Entra App registrations ↗</b></a></li>
-            <li>Click <b>New registration</b> → Name: <code>SmartMail Pro</code> → Select <i>"Accounts in any organizational directory and personal Microsoft accounts"</i>.</li>
-            <li>Under Redirect URI: Select <b>Web</b> and set:
-              <div class="code-copy-row">
-                <code id="redirectUriDisplay">http://localhost:3000/auth/microsoft/callback</code>
+            <li>Click <b>New registration</b> → Name: <code>SmartMail Pro</code> → Select <i>"Accounts in any organizational directory and personal Microsoft accounts"</i></li>
+            <li>Go to <b>Authentication</b> → <b>Add platform</b> → <b>Web</b> → paste this Redirect URI:
+              <div class="code-copy-row" style="margin-top:6px">
+                <code id="redirectUriDisplay">loading...</code>
                 <button type="button" class="mini-copy-btn" onclick="copyRedirectUri()">Copy</button>
               </div>
+              <small style="color:#ef4444;font-size:9px;display:block;margin-top:3px">⚠ This must match exactly — including https:// vs http://</small>
             </li>
-            <li>Under <b>API permissions</b> → Add: <code>Mail.Send</code>, <code>offline_access</code>, <code>User.Read</code>.</li>
-            <li>Under <b>Certificates &amp; secrets</b> → Create <b>New client secret</b> and copy the Value.</li>
+            <li>Under <b>API permissions</b> → Add Delegated: <code>Mail.Send</code>, <code>offline_access</code>, <code>User.Read</code></li>
+            <li>Under <b>Certificates &amp; secrets</b> → <b>New client secret</b> → copy the <b>Value</b> (not the ID)</li>
           </ol>
         </div>
 
@@ -495,10 +467,12 @@
 
         <form id="msConfigForm" onsubmit="saveMsConfig(event)">
           <label>Application (Client) ID
-            <input id="msClientId" type="text" placeholder="e.g. 11111111-2222-3333-4444-555555555555" required>
+            <input id="msClientId" type="text" placeholder="e.g. 3f43945e-74c8-4f82-a568-01e2ef3eacc8"
+                   oninput="validateClientId(this)" required>
+            <small style="font-size:9px;color:var(--muted)">Found in Azure → App registrations → your app → Overview. Do NOT include <code>api://</code></small>
           </label>
           <label>Client Secret (Value)
-            <input id="msClientSecret" type="password" placeholder="Leave empty if already saved in .env">
+            <input id="msClientSecret" type="password" placeholder="Paste the Value from Certificates & secrets">
           </label>
           <label>Tenant ID
             <input id="msTenantId" type="text" value="common" placeholder="common">

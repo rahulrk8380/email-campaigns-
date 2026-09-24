@@ -168,7 +168,7 @@ function renderContacts() {
         <td><span class="status ready">Ready</span></td>
       </tr>
     `;
-  }).join("") || `<tr><td colspan="7" class="empty">No contacts loaded. Upload an Excel file above.</td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="empty">No contacts loaded. Upload an Excel file above.</td></tr>`;
 
   document.querySelectorAll(".contact-check").forEach(cb => {
     cb.addEventListener("change", e => {
@@ -197,7 +197,7 @@ function renderComposeRecipients() {
   });
 
   if (!list.length) {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty">${contacts.length === 0 ? "No contacts loaded yet. Upload in Contacts tab." : "No contacts match search filter."}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty">${contacts.length === 0 ? "No contacts loaded yet. Upload in Contacts tab." : "No contacts match search filter."}</td></tr>`;
     return;
   }
 
@@ -563,6 +563,26 @@ function downloadReport(campaignId) {
 }
 window.downloadReport = downloadReport;
 
+// ── Schedule Send Helpers ─────────────────────────────────────────────────────
+function toggleSchedule() {
+  const on = $("scheduleToggle") && $("scheduleToggle").checked;
+  const box = $("scheduleBox");
+  if (box) box.classList.toggle("hidden", !on);
+  if (on && $("scheduledAt")) {
+    // Default to 1 hour from now
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    const pad = n => String(n).padStart(2, "0");
+    $("scheduledAt").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+}
+window.toggleSchedule = toggleSchedule;
+
+function getScheduledAt() {
+  if (!$("scheduleToggle") || !$("scheduleToggle").checked) return null;
+  const val = $("scheduledAt") && $("scheduledAt").value;
+  if (!val) return null;
+  return new Date(val).toISOString();
+}
 
 async function removeAttachment(id) {
   try {
@@ -838,7 +858,8 @@ async function sendCampaignDirect() {
         attachmentIds: selectedAttachments.map(a => a.id),
         senderType,
         pdfFolderId: currentPdfFolderId || null,
-        delaySeconds: getDelaySeconds()
+        delaySeconds: getDelaySeconds(),
+        scheduledAt: getScheduledAt()
       })
     });
 
@@ -852,6 +873,15 @@ async function sendCampaignDirect() {
     }
 
     currentCampaignId = d.campaignId;
+
+    // Scheduled — don't send now, show confirmation
+    if (d.scheduled) {
+      const when = new Date(d.scheduledAt).toLocaleString();
+      toast(`📅 Campaign scheduled! Will send automatically at ${when}`, "success");
+      showPage("campaigns");
+      await loadCampaigns();
+      return;
+    }
 
     // Check for duplicate loan numbers — show warning modal before sending
     if (d.duplicates && d.duplicates.length > 0) {
@@ -1196,107 +1226,14 @@ const SMTP_PROVIDERS = {
 };
 let _activeProvider = "outlook";
 
-// Tab switcher for Device / Simple / OAuth
+// Tab switcher for Simple / OAuth
 function switchSetupTab(tab) {
-  ["device","simple","oauth"].forEach(t => {
-    const btn = $("tab" + t.charAt(0).toUpperCase() + t.slice(1));
-    const pane = $("setup" + t.charAt(0).toUpperCase() + t.slice(1));
-    if (btn)  btn.classList.toggle("active", t === tab);
-    if (pane) pane.classList.toggle("hidden", t !== tab);
-  });
+  $("tabSimple").classList.toggle("active", tab === "simple");
+  $("tabOauth").classList.toggle("active", tab === "oauth");
+  $("setupSimple").classList.toggle("hidden", tab !== "simple");
+  $("setupOauth").classList.toggle("hidden", tab !== "oauth");
 }
 window.switchSetupTab = switchSetupTab;
-
-// ── Device Code Flow ──────────────────────────────────────────────────────────
-let _deviceStateId   = null;
-let _devicePollTimer = null;
-
-async function startDeviceCodeFlow() {
-  const clientId = $("deviceClientId").value.trim();
-  const msg      = $("deviceMsg");
-
-  if (!clientId) {
-    msg.textContent = "Please paste your Microsoft Client ID.";
-    msg.style.color = "#ef4444"; return;
-  }
-
-  msg.textContent = "Connecting to Microsoft…";
-  msg.style.color = "#6b7280";
-
-  try {
-    // Save client ID first
-    await api("/api/microsoft/save-client", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId })
-    });
-
-    const r = await api("/api/microsoft/device-code/start", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-
-    _deviceStateId = r.stateId;
-    $("deviceUserCode").textContent = r.user_code;
-    const verifyUrl = r.verification_uri || "https://microsoft.com/devicelogin";
-    const link = $("deviceVerifyUrl");
-    link.href = verifyUrl;
-    link.textContent = verifyUrl.replace("https://","") + " ↗";
-
-    $("deviceStep1").classList.add("hidden");
-    $("deviceStep2").classList.remove("hidden");
-
-    // Open the URL automatically
-    window.open(verifyUrl, "_blank");
-
-    // Start polling
-    $("devicePollMsg").textContent = "⏳ Waiting for you to sign in…";
-    $("devicePollMsg").style.color = "#6b7280";
-    _devicePollTimer = setInterval(pollDeviceCode, 5000);
-  } catch (e) {
-    msg.textContent = "✕ " + e.message;
-    msg.style.color = "#ef4444";
-  }
-}
-window.startDeviceCodeFlow = startDeviceCodeFlow;
-
-async function pollDeviceCode() {
-  if (!_deviceStateId) return;
-  try {
-    const r = await api("/api/microsoft/device-code/poll", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stateId: _deviceStateId })
-    });
-
-    if (r.ready) {
-      clearInterval(_devicePollTimer);
-      _devicePollTimer = null;
-      _deviceStateId   = null;
-
-      // Update topbar tag
-      const tag = $("activeSenderTag");
-      if (tag) { tag.textContent = r.email; tag.classList.remove("hidden"); }
-
-      toast(`✓ Outlook connected! Campaigns will send from ${r.email}`, "success");
-      closeMsModal();
-    }
-    // else still pending — keep polling
-  } catch (e) {
-    clearInterval(_devicePollTimer);
-    _devicePollTimer = null;
-    $("devicePollMsg").textContent = "✕ " + e.message;
-    $("devicePollMsg").style.color = "#ef4444";
-  }
-}
-
-function cancelDeviceFlow() {
-  clearInterval(_devicePollTimer);
-  _devicePollTimer = null;
-  _deviceStateId   = null;
-  $("deviceStep1").classList.remove("hidden");
-  $("deviceStep2").classList.add("hidden");
-  $("deviceMsg").textContent = "";
-}
-window.cancelDeviceFlow = cancelDeviceFlow;
 
 function pickProvider(p) {
   _activeProvider = p;
@@ -1410,18 +1347,48 @@ async function quickSmtpSendOtp() {
 window.quickSmtpSendOtp = quickSmtpSendOtp;
 
 // Stub old MS functions so no JS errors
-function openMsModal() { $("msModal").classList.remove("hidden"); }
-function closeMsModal() { $("msModal").classList.add("hidden"); $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = ""); }
+function openMsModal() {
+  $("msModal").classList.remove("hidden");
+  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
+  // Auto-fill the correct redirect URI based on current URL
+  const base = window.location.origin;
+  const redirectUri = base + "/auth/microsoft/callback";
+  const el = $("redirectUriDisplay");
+  if (el) el.textContent = redirectUri;
+}
+function closeMsModal() {
+  $("msModal").classList.add("hidden");
+  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
+}
 function saveMsConfig(e) { if(e) e.preventDefault(); }
 function disconnectMicrosoft() {}
 function checkCurrentSender() {}
-function copyRedirectUri() {}
+function copyRedirectUri() {
+  const txt = $("redirectUriDisplay") ? $("redirectUriDisplay").textContent : "";
+  if (!txt || txt === "loading...") return;
+  navigator.clipboard.writeText(txt).then(() => toast("✓ Redirect URI copied!", "success")).catch(() => {});
+}
+function validateClientId(input) {
+  const val = (input.value || "").trim();
+  const warn = $("oauthWarning");
+  if (!warn) return;
+  // Show warning if value starts with api:// or looks like an App ID URI
+  if (val.startsWith("api://") || val.startsWith("https://")) {
+    warn.classList.remove("hidden");
+    // Auto-fix: strip the api:// prefix
+    const uuid = val.replace(/^api:\/\//, "").replace(/^https?:\/\/[^/]+\//, "");
+    if (uuid !== val) input.value = uuid;
+  } else {
+    warn.classList.add("hidden");
+  }
+}
 window.openMsModal = openMsModal;
 window.closeMsModal = closeMsModal;
 window.saveMsConfig = saveMsConfig;
 window.disconnectMicrosoft = disconnectMicrosoft;
 window.checkCurrentSender = checkCurrentSender;
 window.copyRedirectUri = copyRedirectUri;
+window.validateClientId = validateClientId;
 
 // ── Switch Mail (topbar button) ───────────────────────────────────────────────
 let _smtpOtpEmail = "";
