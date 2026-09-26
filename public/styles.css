@@ -208,3 +208,73 @@
 .schedule-section{border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;margin-top:12px;background:#f9fafb}
 .schedule-toggle-label{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;cursor:pointer;user-select:none}
 .schedule-toggle-label input{width:auto;accent-color:var(--primary)}
+
+/* ── Multi-email & CC badges ─────────────────────────────────────────── */
+.email-more-badge{display:inline-block;margin-left:5px;padding:2px 7px;border-radius:999px;background:#eeedff;color:#554bd8;font-size:9px;font-weight:900;vertical-align:middle;white-space:nowrap}
+
+/* ── Invalid contact rows ────────────────────────────────────────────── */
+.row-invalid td{background:#fff5f5!important;color:#7a3333!important;opacity:.9}
+.row-invalid td b{color:#8b0000!important}
+.invalid-reason{font-size:9px;color:#c53030;margin-top:2px;font-weight:700}
+.status.invalid-row-status{background:#ffeaed;color:#c73749}
+
+/* ── Available Variables panel ───────────────────────────────────────── */
+.available-vars-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding:4px 0}
+.available-var-chip{border:1px solid #bde0ff;border-radius:9px;background:#e8f4ff;color:#1a6db5;padding:7px 11px;font-size:10px;font-weight:850;cursor:pointer;transition:.15s;font-family:ui-monospace,monospace}
+.available-var-chip:hover{background:#cde8ff;border-color:#64b5f6;transform:translateY(-1px);box-shadow:0 3px 8px rgba(26,109,181,.15)}
+.var-target-radio{display:flex;align-items:center;gap:4px;font-size:10px;font-weight:700;cursor:pointer}
+.var-target-radio input{width:auto;accent-color:var(--primary)}
+.var-target-select{border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 7px;font-size:10px;font-weight:700;color:var(--ink);outline:none;cursor:pointer}
+.var-target-select:focus{border-color:var(--primary)}
+
+/* ── Preview row (To/CC) in live preview panel ───────────────────────── */
+.preview-to-row{font-size:10px;color:#7b86a0;margin-bottom:6px;min-height:16px}
+.preview-to-label{font-weight:900;color:#5c53df}
+.preview-to-val{color:#475569}
+.preview-cc-label{font-weight:900;color:#0e7e5a}
+
+/* ── Preview Modal ───────────────────────────────────────────────────── */
+.preview-modal-email{border:1px solid var(--line);border-radius:14px;background:#fcfdff;padding:18px;margin:14px 0}
+.preview-modal-row{display:flex;gap:10px;margin-bottom:8px;align-items:flex-start;font-size:11px}
+.preview-modal-label{font-weight:900;color:#65718a;white-space:nowrap;min-width:52px;padding-top:1px}
+.preview-modal-value{color:var(--ink);line-height:1.5;flex:1}
+.preview-modal-subject{font-weight:850;font-size:12px}
+.preview-modal-divider{height:1px;background:var(--line);margin:12px 0}
+.preview-modal-body{white-space:pre-wrap;line-height:1.7;font-size:11px;color:#59657e;max-height:280px;overflow-y:auto}
+.preview-modal-warnings{background:#fff8e6;border:1px solid #f7d87a;border-radius:10px;padding:10px 13px;font-size:11px;color:#7a5200;margin-top:8px}
+.preview-modal-warnings code{background:#fef0c0;border-radius:5px;padding:2px 5px;font-size:10px}
+
+/* ── Validation Modal ────────────────────────────────────────────────── */
+.validation-summary-banner{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0 6px;padding:14px;background:#f8f9fd;border:1px solid var(--line);border-radius:12px}
+.validation-stat{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;min-width:70px}
+.validation-stat span{font-size:24px;font-weight:900;letter-spacing:-1px;color:var(--ink)}
+.validation-stat small{font-size:9px;font-weight:800;color:var(--muted);text-align:center}
+.validation-stat.ok span{color:var(--green)}
+.validation-stat.warn span{color:#d97706}
+.validation-stat.err span{color:var(--red)}
+.validation-issues-list{margin-top:12px;border:1px solid #fde68a;border-radius:11px;background:#fffbeb;overflow:hidden;max-height:220px;overflow-y:auto}
+.validation-issues-header{padding:9px 12px;font-size:10px;font-weight:900;color:#92400e;background:#fef3c7;border-bottom:1px solid #fde68a}
+.validation-issue-row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:8px 12px;border-bottom:1px solid #fef0c0;font-size:11px}
+.validation-issue-row:last-child{border-bottom:none}
+.validation-issue-name{font-weight:750;color:#78350f;white-space:nowrap}
+.validation-issue-reason{color:#92400e;font-size:10px;text-align:right;line-height:1.4}
+.validation-issue-more{padding:8px 12px;font-size:10px;color:#92400e;font-style:italic}
+
+/* ── Confirm Modal ───────────────────────────────────────────────────── */
+.confirm-stats{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0;padding:16px;background:#f8f9fd;border:1px solid var(--line);border-radius:12px}
+.confirm-stat{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:70px}
+.confirm-stat span{font-size:28px;font-weight:900;letter-spacing:-1px;color:var(--ink)}
+.confirm-stat small{font-size:9px;font-weight:800;color:var(--muted);text-align:center}
+.confirm-warning{padding:10px 12px;background:#fff8e6;border:1px solid #f7d87a;border-radius:9px;font-size:11px;color:#7a5200;margin:0}
+
+/* ── Campaign recipients detail table ────────────────────────────────── */
+.to-emails-cell{max-width:220px;word-break:break-all;line-height:1.5;font-size:10px}
+
+/* ── Failed download button ──────────────────────────────────────────── */
+.failed-dl-btn{background:#ffeaed;border-color:#f8d5d9;color:#c73749;font-weight:850}
+.failed-dl-btn:hover{background:#ffd5da}
+
+/* ── Campaign send button improvements ───────────────────────────────── */
+.green{color:var(--green)!important;font-weight:850}
+.red{color:var(--red)!important;font-weight:850}
+

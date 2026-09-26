@@ -6,6 +6,9 @@ let composeSearchFilter = "";
 let msStatus = { connected: false, email: null, name: null, clientIdConfigured: false };
 let currentPdfFolderId = null;
 let pdfFolderFileNames = [];
+let excelHeaders = []; // All headers from last uploaded Excel
+let _validationResult = null; // Cached validation result
+let _pendingSendCallback = null; // Called after confirm modal approved
 const $ = id => document.getElementById(id);
 
 function toast(message, type = "info") {
@@ -30,7 +33,6 @@ function esc(v) {
 }
 
 async function boot() {
-  // Check for Microsoft OAuth redirect query params
   const params = new URLSearchParams(window.location.search);
   if (params.get("microsoft") === "connected") {
     toast("Microsoft Outlook account connected successfully!", "success");
@@ -133,7 +135,7 @@ function updateSelectedCount() {
   const count = selectedContactIds.size;
   $("selectedCount").textContent = count;
   if ($("composeRecipientsSubtitle")) {
-    $("composeRecipientsSubtitle").textContent = `${count} of ${contacts.length} recipients selected`;
+    $("composeRecipientsSubtitle").textContent = `${count} of ${contacts.length} rows selected`;
   }
   updateSendButtonLabel();
 }
@@ -149,26 +151,64 @@ function updateSendButtonLabel() {
   } else if (select && select.value === "smtp") {
     senderName = "Custom SMTP";
   }
-  btn.innerHTML = `Send to ${count} recipient${count === 1 ? "" : "s"} via ${senderName} <span>→</span>`;
+  btn.innerHTML = `Send ${count} email${count === 1 ? "" : "s"} via ${senderName} <span>→</span>`;
+}
+
+// ── Contacts Table ─────────────────────────────────────────────────────────────
+
+function getContactEmails(c) {
+  let extras = {};
+  try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+  let emailArr = [];
+  try { emailArr = JSON.parse(extras["__emails"] || "[]"); } catch {}
+  if (!emailArr.length && c.email) emailArr = [c.email];
+  return emailArr;
+}
+
+function getContactCC(c) {
+  let extras = {};
+  try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+  return String(extras["__cc"] || "");
+}
+
+function getContactInvalid(c) {
+  let extras = {};
+  try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+  return extras["__invalid"] || null;
 }
 
 function renderContacts() {
-  $("contactCount").textContent = `${contacts.length} contacts`;
+  $("contactCount").textContent = `${contacts.length} contacts (rows)`;
   $("contactsTable").innerHTML = contacts.map((c, i) => {
     const isChecked = selectedContactIds.has(c.id);
+    const emails = getContactEmails(c);
+    const cc = getContactCC(c);
+    const invalid = getContactInvalid(c);
+
+    const primaryEmail = emails[0] || "—";
+    const extraCount = emails.length - 1;
+    const extraBadge = extraCount > 0
+      ? `<span class="email-more-badge">+${extraCount} more</span>` : "";
+
+    const statusCls = invalid ? "invalid-row-status" : "ready";
+    const statusLabel = invalid ? "⚠ No Email" : "Ready";
+
+    const ccDisplay = cc
+      ? cc.split(";").filter(Boolean).join(", ")
+      : "—";
+
     return `
-      <tr>
+      <tr class="${invalid ? "row-invalid" : ""}">
         <td><input class="contact-check" type="checkbox" value="${c.id}" ${isChecked ? "checked" : ""}></td>
         <td>${i + 1}</td>
         <td><b>${esc(c.name)}</b></td>
-        <td>${esc(c.email)}</td>
-        <td>${esc(c.number || "—")}</td>
-        <td>${esc(c.branch || c.Branch || "—")}</td>
-        <td>${esc(c.details || "—")}</td>
-        <td><span class="status ready">Ready</span></td>
+        <td>${esc(primaryEmail)}${extraBadge}</td>
+        <td>${extraCount > 0 ? emails.slice(1).map(esc).join("<br>") : "—"}</td>
+        <td>${esc(ccDisplay)}</td>
+        <td><span class="status ${statusCls}">${statusLabel}</span>${invalid ? `<div class="invalid-reason">${esc(invalid)}</div>` : ""}</td>
       </tr>
     `;
-  }).join("") || `<tr><td colspan="8" class="empty">No contacts loaded. Upload an Excel file above.</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="empty">No contacts loaded. Upload an Excel file above.</td></tr>`;
 
   document.querySelectorAll(".contact-check").forEach(cb => {
     cb.addEventListener("change", e => {
@@ -203,14 +243,26 @@ function renderComposeRecipients() {
 
   tbody.innerHTML = list.map((c, i) => {
     const isChecked = selectedContactIds.has(c.id);
+    const emails = getContactEmails(c);
+    const cc = getContactCC(c);
+    const invalid = getContactInvalid(c);
+
+    const primaryEmail = emails[0] || "—";
+    const extraCount = emails.length - 1;
+    const extraBadge = extraCount > 0 ? `<span class="email-more-badge">+${extraCount}</span>` : "";
+    const ccDisplay = cc ? cc.split(";").filter(Boolean).slice(0, 1).join(", ") + (cc.split(";").filter(Boolean).length > 1 ? "..." : "") : "—";
+
+    const statusCls = invalid ? "draft" : isChecked ? "ready" : "draft";
+    const statusLabel = invalid ? "Invalid" : isChecked ? "Ready" : "Excluded";
+
     return `
-      <tr>
+      <tr class="${invalid ? "row-invalid" : ""}">
         <td><input class="compose-contact-check" type="checkbox" data-id="${c.id}" ${isChecked ? "checked" : ""}></td>
         <td>${i + 1}</td>
         <td><b>${esc(c.name)}</b></td>
-        <td>${esc(c.email)}</td>
-        <td>${esc(c.branch || c.Branch || "—")}</td>
-        <td><span class="status ${isChecked ? "ready" : "draft"}">${isChecked ? "Ready" : "Excluded"}</span></td>
+        <td>${esc(primaryEmail)}${extraBadge}</td>
+        <td>${esc(ccDisplay)}</td>
+        <td><span class="status ${statusCls}">${statusLabel}</span></td>
       </tr>
     `;
   }).join("");
@@ -247,7 +299,9 @@ window.selectComposeRecipients = selectComposeRecipients;
 async function loadContacts() {
   try {
     contacts = await api("/api/contacts");
-    selectedContactIds = new Set(contacts.map(c => c.id));
+    selectedContactIds = new Set(
+      contacts.filter(c => !getContactInvalid(c)).map(c => c.id)
+    );
     renderContacts();
     renderDynamicColumnChips();
   } catch {}
@@ -294,10 +348,23 @@ async function uploadExcel(file) {
   try {
     const d = await api("/api/upload", { method: "POST", body: fd });
     contacts = d.contacts;
-    selectedContactIds = new Set(contacts.map(c => c.id));
+    // Auto-select valid contacts, not invalid ones
+    selectedContactIds = new Set(
+      contacts.filter(c => !getContactInvalid(c)).map(c => c.id)
+    );
+    // Store Excel headers for dynamic variable display
+    excelHeaders = d.headers || [];
+
     renderContacts();
+    renderDynamicColumnChips();
+    showAvailableVarsPanel();
+
+    const invalidMsg = d.invalid > 0
+      ? ` <span style="color:var(--red)">${d.invalid} row${d.invalid === 1 ? "" : "s"} have no valid email (shown in red — excluded from send).</span>`
+      : "";
+
     $("uploadResult").innerHTML =
-      `<div class="success-line">✓ ${d.added} valid contacts loaded. ${d.invalid} rows skipped (missing/invalid/duplicate email).</div>`;
+      `<div class="success-line">✓ ${d.added} rows with valid emails loaded. ${d.total} total rows processed.${invalidMsg}</div>`;
     loadDashboard();
     toast("Contacts imported successfully.", "success");
   } catch (e) {
@@ -311,11 +378,144 @@ async function clearContacts() {
   await api("/api/contacts", { method: "DELETE" });
   contacts = [];
   selectedContactIds.clear();
+  excelHeaders = [];
   renderContacts();
+  renderDynamicColumnChips();
+  hideAvailableVarsPanel();
   loadDashboard();
   toast("Contact list cleared.", "success");
 }
 window.clearContacts = clearContacts;
+
+// ── Available Variables Panel ─────────────────────────────────────────────────
+
+function showAvailableVarsPanel() {
+  const panel = $("availableVarsPanel");
+  if (panel) panel.classList.remove("hidden");
+  renderAvailableVarsChips();
+}
+
+function hideAvailableVarsPanel() {
+  const panel = $("availableVarsPanel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function renderAvailableVarsChips() {
+  const container = $("availableVarsChips");
+  if (!container) return;
+
+  // Use stored headers if available; fall back to deriving from contacts
+  let headers = excelHeaders.length ? excelHeaders : [];
+  if (!headers.length && contacts.length) {
+    // Derive from extra_json keys (exclude internal __ keys)
+    const seen = new Set();
+    contacts.forEach(c => {
+      try {
+        const extras = JSON.parse(c.extra_json || "{}");
+        Object.keys(extras).forEach(k => {
+          if (!k.startsWith("__")) seen.add(k);
+        });
+      } catch {}
+    });
+    headers = [...seen];
+  }
+
+  const vars = headers.filter(h => !String(h).startsWith("__"));
+
+  if (!vars.length) {
+    container.innerHTML = `<span class="muted" style="font-size:11px">Upload an Excel file to see available variables.</span>`;
+    return;
+  }
+
+  container.innerHTML = vars.map(h => `
+    <button class="available-var-chip" onclick="insertVarFromPanel('{{${h}}}')" title="Insert {{${h}}} into selected field">
+      {{${esc(h)}}}
+    </button>
+  `).join("");
+}
+
+function insertVarFromPanel(varStr) {
+  // Determine target field from radio/select
+  const target = getVarInsertTarget();
+  const field = $(target);
+  if (!field) return;
+  field.focus();
+  const a = field.selectionStart ?? field.value.length;
+  const b = field.selectionEnd ?? a;
+  field.value = field.value.slice(0, a) + varStr + field.value.slice(b);
+  field.selectionStart = field.selectionEnd = a + varStr.length;
+  field.dispatchEvent(new Event("input"));
+  toast(`Inserted ${varStr} into ${target === "body" ? "Body" : "Subject"}`, "info");
+}
+window.insertVarFromPanel = insertVarFromPanel;
+
+// ── Dynamic Column Chips (in compose variable-bar) ───────────────────────────
+
+function renderDynamicColumnChips() {
+  const bar = $("variableBar");
+  if (!bar) return;
+
+  // Remove any previously added dynamic chips
+  bar.querySelectorAll(".dynamic-var-chip").forEach(el => el.remove());
+
+  // Build variable list from Excel headers or extra_json
+  let headers = excelHeaders.length ? excelHeaders : [];
+  if (!headers.length && contacts.length) {
+    const seen = new Set();
+    contacts.forEach(c => {
+      // Also include top-level fields
+      ["name", "email", "number", "details"].forEach(k => seen.add(k));
+      try {
+        const extras = JSON.parse(c.extra_json || "{}");
+        Object.keys(extras).forEach(k => {
+          if (!k.startsWith("__")) seen.add(k);
+        });
+      } catch {}
+    });
+    headers = [...seen];
+  }
+
+  headers.filter(h => !String(h).startsWith("__")).forEach(key => {
+    const varName = `{{${key}}}`;
+    const btn = document.createElement("button");
+    btn.textContent = varName;
+    btn.className = "dynamic-var-chip";
+    btn.title = `Insert ${varName} (from your Excel)`;
+    btn.onclick = () => insertVar(varName);
+    bar.appendChild(btn);
+  });
+
+  // Also update the available vars panel if visible
+  renderAvailableVarsChips();
+}
+
+// ── Variable Insert Target (Subject or Body) ──────────────────────────────────
+
+function getVarInsertTarget() {
+  const sel = $("varTargetSelect");
+  if (sel) return sel.value;
+  // Fallback to radio buttons if present
+  const radios = document.querySelectorAll("[name='varTarget']");
+  for (const r of radios) {
+    if (r.checked) return r.value;
+  }
+  return "body";
+}
+
+function insertVar(v) {
+  const target = getVarInsertTarget();
+  const t = $(target) || $("body"); // fallback to body
+  if (!t) return;
+  const a = t.selectionStart ?? t.value.length;
+  const b = t.selectionEnd ?? a;
+  t.value = t.value.slice(0, a) + v + t.value.slice(b);
+  t.focus();
+  t.selectionStart = t.selectionEnd = a + v.length;
+  updatePreview();
+}
+window.insertVar = insertVar;
+
+// ── Format helpers ─────────────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
   const n = Number(bytes || 0);
@@ -372,7 +572,7 @@ async function uploadAttachments(files) {
   }
 }
 
-// ── PDF Folder (Personal PDFs per recipient) ──────────────────────────────────
+// ── PDF Folder ────────────────────────────────────────────────────────────────
 
 function renderPdfFolderStatus() {
   const statusEl = $("pdfFolderStatus");
@@ -405,7 +605,6 @@ async function uploadPdfFolder(files) {
 
   setActionMessage(`Uploading ${pdfs.length} PDF${pdfs.length === 1 ? "" : "s"}...`, "info");
 
-  // Clear any previous folder first
   if (currentPdfFolderId) {
     await api(`/api/pdf-folder/${currentPdfFolderId}`, { method: "DELETE" }).catch(() => {});
     currentPdfFolderId = null;
@@ -440,47 +639,22 @@ async function clearPdfFolder() {
 }
 window.clearPdfFolder = clearPdfFolder;
 
-// Wire up all 3 PDF upload modes
 const pdfFolderInput = $("pdfFolderInput");
 const pdfFolderDirInput = $("pdfFolderDirInput");
 const pdfFolderZipInput = $("pdfFolderZipInput");
 const pdfFolderDropzone = $("pdfFolderDropzone");
 
-if (pdfFolderInput) {
-  pdfFolderInput.addEventListener("change", () => {
-    if (pdfFolderInput.files.length) uploadPdfFolder(pdfFolderInput.files);
-    pdfFolderInput.value = "";
-  });
-}
-if (pdfFolderDirInput) {
-  pdfFolderDirInput.addEventListener("change", () => {
-    if (pdfFolderDirInput.files.length) uploadPdfFolder(pdfFolderDirInput.files);
-    pdfFolderDirInput.value = "";
-  });
-}
-if (pdfFolderZipInput) {
-  pdfFolderZipInput.addEventListener("change", () => {
-    if (pdfFolderZipInput.files.length) uploadPdfFolder(pdfFolderZipInput.files);
-    pdfFolderZipInput.value = "";
-  });
-}
+if (pdfFolderInput) pdfFolderInput.addEventListener("change", () => { if (pdfFolderInput.files.length) uploadPdfFolder(pdfFolderInput.files); pdfFolderInput.value = ""; });
+if (pdfFolderDirInput) pdfFolderDirInput.addEventListener("change", () => { if (pdfFolderDirInput.files.length) uploadPdfFolder(pdfFolderDirInput.files); pdfFolderDirInput.value = ""; });
+if (pdfFolderZipInput) pdfFolderZipInput.addEventListener("change", () => { if (pdfFolderZipInput.files.length) uploadPdfFolder(pdfFolderZipInput.files); pdfFolderZipInput.value = ""; });
 if (pdfFolderDropzone) {
-  ["dragenter", "dragover"].forEach(ev => pdfFolderDropzone.addEventListener(ev, e => {
-    e.preventDefault();
-    pdfFolderDropzone.classList.add("drag");
-  }));
-  ["dragleave", "drop"].forEach(ev => pdfFolderDropzone.addEventListener(ev, e => {
-    e.preventDefault();
-    pdfFolderDropzone.classList.remove("drag");
-  }));
-  pdfFolderDropzone.addEventListener("drop", e => {
-    if (e.dataTransfer.files.length) uploadPdfFolder(e.dataTransfer.files);
-  });
+  ["dragenter", "dragover"].forEach(ev => pdfFolderDropzone.addEventListener(ev, e => { e.preventDefault(); pdfFolderDropzone.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach(ev => pdfFolderDropzone.addEventListener(ev, e => { e.preventDefault(); pdfFolderDropzone.classList.remove("drag"); }));
+  pdfFolderDropzone.addEventListener("drop", e => { if (e.dataTransfer.files.length) uploadPdfFolder(e.dataTransfer.files); });
 }
-
 
 // ── Send Timer ────────────────────────────────────────────────────────────────
-let delayUnit = "sec"; // "sec" or "min"
+let delayUnit = "sec";
 
 function setDelayUnit(unit) {
   delayUnit = unit;
@@ -503,152 +677,86 @@ function updateDelayPreview() {
     : `${secs} second${secs === 1 ? "" : "s"}`;
   const el = $("delayPreview");
   if (el) el.textContent = `Each email will be sent ${label} apart`;
-  // Sync slider (clamp to slider max 300)
   const slider = $("delaySlider");
   if (slider) slider.value = Math.min(300, secs);
 }
 
-// Wire slider ↔ input
 const delaySlider = $("delaySlider");
 const delayInput = $("delayInput");
 if (delaySlider && delayInput) {
-  delaySlider.addEventListener("input", () => {
-    delayInput.value = delaySlider.value;
-    updateDelayPreview();
-  });
-  delayInput.addEventListener("input", () => {
-    delaySlider.value = Math.min(300, Number(delayInput.value) || 1);
-    updateDelayPreview();
-  });
+  delaySlider.addEventListener("input", () => { delayInput.value = delaySlider.value; updateDelayPreview(); });
+  delayInput.addEventListener("input", () => { delaySlider.value = Math.min(300, Number(delayInput.value) || 1); updateDelayPreview(); });
 }
 
-// ── Dynamic Extra Columns from contacts ──────────────────────────────────────
-function renderDynamicColumnChips() {
-  const extraKeys = new Set();
-  contacts.forEach(c => {
-    try {
-      const extras = JSON.parse(c.extra_json || "{}");
-      Object.keys(extras).forEach(k => extraKeys.add(k));
-    } catch {}
-  });
-
-  const bar = document.querySelector(".variable-bar");
-  if (!bar) return;
-
-  // Remove any previously added dynamic chips
-  bar.querySelectorAll(".dynamic-var-chip").forEach(el => el.remove());
-
-  extraKeys.forEach(key => {
-    const varName = `{{${key}}}`;
-    const btn = document.createElement("button");
-    btn.textContent = varName;
-    btn.className = "dynamic-var-chip";
-    btn.title = `Insert ${varName} (from your Excel)`;
-    btn.onclick = () => insertVar(varName);
-    bar.appendChild(btn);
-  });
-}
-
-// ── Download Full Report ──────────────────────────────────────────────────────
-function downloadReport(campaignId) {
-  if (!campaignId) return toast("No campaign selected.", "error");
-  // Open in new tab so session stays intact in the main tab
-  const a = document.createElement("a");
-  a.href = `/api/campaigns/${campaignId}/report`;
-  a.target = "_blank";
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-}
-window.downloadReport = downloadReport;
-
-// ── Schedule Send Helpers ─────────────────────────────────────────────────────
-function toggleSchedule() {
-  const on = $("scheduleToggle") && $("scheduleToggle").checked;
-  const box = $("scheduleBox");
-  if (box) box.classList.toggle("hidden", !on);
-  if (on && $("scheduledAt")) {
-    // Default to 1 hour from now
-    const d = new Date(Date.now() + 60 * 60 * 1000);
-    const pad = n => String(n).padStart(2, "0");
-    $("scheduledAt").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
-}
-window.toggleSchedule = toggleSchedule;
-
-function getScheduledAt() {
-  if (!$("scheduleToggle") || !$("scheduleToggle").checked) return null;
-  const val = $("scheduledAt") && $("scheduledAt").value;
-  if (!val) return null;
-  return new Date(val).toISOString();
-}
-
-async function removeAttachment(id) {
-  try {
-    await api(`/api/attachments/${id}`, { method: "DELETE" });
-    selectedAttachments = selectedAttachments.filter(a => a.id !== id);
-    renderAttachments();
-    toast("Attachment removed.", "success");
-  } catch (e) {
-    toast(e.message, "error");
-  }
-}
-window.removeAttachment = removeAttachment;
-
-const attachmentInput = $("attachmentInput");
-const attachmentDropzone = $("attachmentDropzone");
-attachmentInput.addEventListener("change", () => {
-  uploadAttachments(attachmentInput.files);
-  attachmentInput.value = "";
-});
-["dragenter", "dragover"].forEach(ev => attachmentDropzone.addEventListener(ev, e => {
-  e.preventDefault();
-  attachmentDropzone.classList.add("drag");
-}));
-["dragleave", "drop"].forEach(ev => attachmentDropzone.addEventListener(ev, e => {
-  e.preventDefault();
-  attachmentDropzone.classList.remove("drag");
-}));
-attachmentDropzone.addEventListener("click", () => attachmentInput.click());
-attachmentDropzone.addEventListener("drop", e => uploadAttachments(e.dataTransfer.files));
-renderAttachments();
+// ── Live Preview ──────────────────────────────────────────────────────────────
 
 function updatePreview() {
   const subject = $("subject").value || "Your subject";
   const body = $("body").value || "Your personalized message will appear here.";
 
-  $("previewSubject").textContent = subject
-    .replaceAll("{{name}}", "Arun")
-    .replaceAll("{{email}}", "arun@example.com");
+  // Use first selected contact's real data, or sample data
+  const selectedList = contacts.filter(c => selectedContactIds.has(c.id));
+  const sampleContact = selectedList[0] || null;
 
-  $("previewBody").textContent = body
-    .replaceAll("{{name}}", "Arun")
-    .replaceAll("{{email}}", "arun@example.com")
-    .replaceAll("{{number}}", "9876543210")
-    .replaceAll("{{details}}", "Sample details");
+  let renderedSubject = subject;
+  let renderedBody = body;
+  let toLine = "";
+  let ccLine = "";
+
+  if (sampleContact) {
+    // Client-side variable substitution using contact data
+    renderedSubject = clientRenderTemplate(subject, sampleContact);
+    renderedBody = clientRenderTemplate(body, sampleContact);
+    const emails = getContactEmails(sampleContact);
+    const cc = getContactCC(sampleContact);
+    toLine = emails.join(", ") || sampleContact.email || "";
+    ccLine = cc ? cc.split(";").filter(Boolean).join(", ") : "";
+    if ($("previewSampleTag")) {
+      $("previewSampleTag").textContent = `Preview: ${sampleContact.name}`;
+    }
+  } else {
+    if ($("previewSampleTag")) $("previewSampleTag").textContent = "Sample: first row";
+  }
+
+  $("previewSubject").textContent = renderedSubject;
+  $("previewBody").textContent = renderedBody;
+
+  const toRowEl = $("previewToRow");
+  if (toRowEl) {
+    toRowEl.innerHTML = toLine
+      ? `<span class="preview-to-label">To:</span> <span class="preview-to-val">${esc(toLine)}${ccLine ? ` &nbsp;|&nbsp; <span class="preview-cc-label">CC:</span> ${esc(ccLine)}` : ""}</span>`
+      : "";
+  }
+}
+
+// Client-side template rendering (mirrors server-side logic)
+function clientRenderTemplate(template, contact) {
+  let extras = {};
+  try { extras = JSON.parse(contact.extra_json || "{}"); } catch {}
+  const merged = { ...contact, ...extras };
+
+  return String(template || "").replace(/\{\{([^}]+)\}\}/g, (match, varName) => {
+    const key = varName.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+    // Search merged keys case-insensitively
+    for (const [k, v] of Object.entries(merged)) {
+      if (k.startsWith("__")) continue;
+      const normK = String(k).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (normK === key) return String(v ?? "");
+    }
+    return match; // keep original if not found
+  });
 }
 
 $("subject").addEventListener("input", updatePreview);
 $("body").addEventListener("input", updatePreview);
-
-function insertVar(v) {
-  const t = $("body");
-  const a = t.selectionStart;
-  const b = t.selectionEnd;
-  t.value = t.value.slice(0, a) + v + t.value.slice(b);
-  t.focus();
-  t.selectionStart = t.selectionEnd = a + v.length;
-  updatePreview();
-}
-window.insertVar = insertVar;
 
 function setActionMessage(message, type = "info") {
   $("actionMessage").className = `action-message ${type}`;
   $("actionMessage").textContent = message;
 }
 
-// Microsoft Status & Configuration
+// ── Microsoft Status & Configuration ──────────────────────────────────────────
+
 async function loadMicrosoftStatus() {
   try {
     msStatus = await api("/api/microsoft/status");
@@ -708,142 +816,240 @@ async function loadSenders() {
   } catch {}
 }
 
+// ── Email Preview Modal ────────────────────────────────────────────────────────
+
+function showEmailPreview() {
+  const subject = $("subject").value.trim();
+  const body = $("body").value.trim();
+
+  if (!subject && !body) return toast("Write a subject and body first.", "error");
+
+  const selectedList = contacts.filter(c => selectedContactIds.has(c.id));
+  if (!selectedList.length) return toast("Select at least one recipient row.", "error");
+
+  const c = selectedList[0];
+  const emails = getContactEmails(c);
+  const cc = getContactCC(c);
+
+  const renderedSubject = clientRenderTemplate(subject || "(no subject)", c);
+  const renderedBody = clientRenderTemplate(body || "(empty body)", c);
+
+  // Check for unresolved variables
+  const unresolvedSubj = findUnresolvedVars(renderedSubject);
+  const unresolvedBody = findUnresolvedVars(renderedBody);
+  const allUnresolved = [...new Set([...unresolvedSubj, ...unresolvedBody])];
+
+  $("previewModalContact").textContent = `Preview for: ${c.name}`;
+  $("previewModalTo").textContent = emails.join(", ") || c.email || "(no email)";
+  $("previewModalSubject").textContent = renderedSubject;
+
+  const ccRow = $("previewModalCcRow");
+  const ccVal = cc ? cc.split(";").filter(Boolean).join(", ") : "";
+  if (ccRow) ccRow.style.display = ccVal ? "flex" : "none";
+  $("previewModalCc").textContent = ccVal;
+
+  const bodyEl = $("previewModalBody");
+  bodyEl.textContent = renderedBody;
+
+  const warningsEl = $("previewModalWarnings");
+  if (allUnresolved.length) {
+    warningsEl.classList.remove("hidden");
+    warningsEl.innerHTML = `⚠️ <b>Unknown variables detected:</b> ${allUnresolved.map(v => `<code>${esc(v)}</code>`).join(", ")} — these will be sent as-is.`;
+  } else {
+    warningsEl.classList.add("hidden");
+  }
+
+  $("previewModal").classList.remove("hidden");
+}
+window.showEmailPreview = showEmailPreview;
+
+function closePreviewModal() {
+  $("previewModal").classList.add("hidden");
+}
+window.closePreviewModal = closePreviewModal;
+
+function findUnresolvedVars(text) {
+  const matches = String(text || "").matchAll(/\{\{([^}]+)\}\}/g);
+  return [...new Set([...matches].map(m => m[0]))];
+}
+
+// ── Validation Modal ──────────────────────────────────────────────────────────
+
+async function runValidation(ids, subject, body) {
+  const result = await api("/api/validate-recipients", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selectedIds: ids, subject, body })
+  });
+  return result;
+}
+
+function showValidationModal(result, onProceed) {
+  _validationResult = result;
+  _pendingSendCallback = onProceed;
+
+  const icon = $("validationModalIcon");
+  const title = $("validationModalTitle");
+  const subtitle = $("validationModalSubtitle");
+  const banner = $("validationSummaryBanner");
+  const issuesList = $("validationIssuesList");
+  const issuesRows = $("validationIssuesRows");
+  const proceedBtn = $("validationProceedBtn");
+
+  const hasIssues = result.invalid > 0;
+
+  icon.style.background = hasIssues
+    ? "linear-gradient(135deg,#f59e0b,#d97706)"
+    : "linear-gradient(135deg,#13a673,#0e7e5a)";
+  icon.textContent = hasIssues ? "⚠" : "✓";
+
+  title.textContent = hasIssues ? "Validation: Issues Found" : "Validation: All Clear";
+  subtitle.textContent = hasIssues
+    ? `${result.invalid} row(s) will be skipped`
+    : "All selected rows are ready to send";
+
+  banner.innerHTML = `
+    <div class="validation-stat"><span>${result.total}</span><small>Total rows</small></div>
+    <div class="validation-stat ok"><span>${result.valid}</span><small>✓ Will send</small></div>
+    <div class="validation-stat ${result.invalid > 0 ? "warn" : ""}"><span>${result.invalid}</span><small>⚠ Will skip</small></div>
+    <div class="validation-stat ${result.missingEmail > 0 ? "err" : ""}"><span>${result.missingEmail}</span><small>✕ No email</small></div>
+  `;
+
+  if (hasIssues) {
+    issuesList.classList.remove("hidden");
+    const badRows = result.rows.filter(r => !r.valid);
+    issuesRows.innerHTML = badRows.slice(0, 20).map(r => `
+      <div class="validation-issue-row">
+        <span class="validation-issue-name">${esc(r.name)}</span>
+        <span class="validation-issue-reason">${r.issues.map(esc).join(" · ")}</span>
+      </div>
+    `).join("") + (badRows.length > 20 ? `<div class="validation-issue-more">...and ${badRows.length - 20} more</div>` : "");
+  } else {
+    issuesList.classList.add("hidden");
+  }
+
+  if (result.valid === 0) {
+    proceedBtn.disabled = true;
+    proceedBtn.textContent = "No valid rows to send";
+  } else {
+    proceedBtn.disabled = false;
+    proceedBtn.textContent = `Send ${result.valid} email${result.valid === 1 ? "" : "s"} →`;
+  }
+
+  $("validationModal").classList.remove("hidden");
+}
+
+function closeValidationModal() {
+  $("validationModal").classList.add("hidden");
+}
+window.closeValidationModal = closeValidationModal;
+
+function proceedAfterValidation() {
+  closeValidationModal();
+  if (_pendingSendCallback) _pendingSendCallback();
+}
+window.proceedAfterValidation = proceedAfterValidation;
+
+// ── Confirm Modal ─────────────────────────────────────────────────────────────
+
+function showConfirmModal(validResult, onConfirm) {
+  _pendingSendCallback = onConfirm;
+
+  $("confirmRows").textContent = validResult.total;
+  $("confirmValid").textContent = validResult.valid;
+  $("confirmInvalid").textContent = validResult.invalid;
+
+  // Estimate total recipients
+  const selectedList = contacts.filter(c => selectedContactIds.has(c.id) && !getContactInvalid(c));
+  let totalRecipients = 0;
+  selectedList.forEach(c => {
+    totalRecipients += getContactEmails(c).length || 1;
+  });
+  $("confirmRecipients").textContent = totalRecipients;
+
+  const warning = $("confirmWarning");
+  if (validResult.invalid > 0) {
+    warning.classList.remove("hidden");
+    warning.textContent = `⚠ ${validResult.invalid} row(s) with no valid email will be skipped.`;
+  } else {
+    warning.classList.add("hidden");
+  }
+
+  $("confirmModal").classList.remove("hidden");
+}
+
+function closeConfirmModal() {
+  $("confirmModal").classList.add("hidden");
+}
+window.closeConfirmModal = closeConfirmModal;
+
+async function executeSend() {
+  closeConfirmModal();
+  if (_pendingSendCallback) {
+    await _pendingSendCallback();
+  }
+}
+window.executeSend = executeSend;
+
+// ── Send Campaign Flow ────────────────────────────────────────────────────────
+
 function openMsModal() {
   $("msModal").classList.remove("hidden");
-  loadMicrosoftStatus();
+  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
+  const base = window.location.origin;
+  const redirectUri = base + "/auth/microsoft/callback";
+  const el = $("redirectUriDisplay");
+  if (el) el.textContent = redirectUri;
 }
-window.openMsModal = openMsModal;
 
 function closeMsModal() {
   $("msModal").classList.add("hidden");
+  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
 }
-window.closeMsModal = closeMsModal;
-
-function copyRedirectUri() {
-  const uri = $("redirectUriDisplay").textContent.trim();
-  navigator.clipboard.writeText(uri);
-  toast("Redirect URI copied to clipboard!", "success");
-}
-window.copyRedirectUri = copyRedirectUri;
-
-async function saveMsConfig(e) {
-  e.preventDefault();
-  const clientId = $("msClientId").value.trim();
-  const clientSecret = $("msClientSecret").value.trim();
-  const tenantId = $("msTenantId").value.trim() || "common";
-
-  if (!clientId && !msStatus.clientIdConfigured) {
-    return toast("Application (Client) ID is required.", "error");
-  }
-
-  try {
-    await api("/api/microsoft/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId, clientSecret, tenantId })
-    });
-
-    toast("Redirecting to Microsoft Sign-in...", "info");
-    window.location.href = "/auth/microsoft/login";
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-window.saveMsConfig = saveMsConfig;
-
-async function disconnectMicrosoft() {
-  if (!confirm("Disconnect your Microsoft Outlook account?")) return;
-  try {
-    await api("/api/microsoft/disconnect", { method: "POST" });
-    toast("Microsoft Outlook disconnected.", "success");
-    await loadMicrosoftStatus();
-    await loadSenders();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-window.disconnectMicrosoft = disconnectMicrosoft;
-
-async function checkCurrentSender() {
-  const select = $("senderSelect");
-  const senderType = select?.value || "microsoft";
-
-  setActionMessage("Checking sender connection...", "info");
-
-  try {
-    if (senderType === "microsoft") {
-      const d = await api("/api/microsoft/check", { method: "POST" });
-      setActionMessage(`✓ Microsoft Outlook connected as ${d.email} (${d.name || "Verified"})`, "success");
-      toast(`Outlook verified: ${d.email}`, "success");
-    } else {
-      const d = await api("/api/test-smtp", { method: "POST" });
-      setActionMessage("✓ " + d.message, "success");
-      toast(d.message, "success");
-    }
-  } catch (e) {
-    setActionMessage("✕ " + e.message, "error");
-    toast(e.message, "error");
-    if (senderType === "microsoft" && e.message.includes("not connected")) {
-      setTimeout(() => openMsModal(), 700);
-    }
-  }
-}
-window.checkCurrentSender = checkCurrentSender;
-window.checkSMTP = checkCurrentSender;
-
-async function sendTest() {
-  const to = $("testEmail").value.trim();
-  if (!to) return toast("Enter a test email address first.", "error");
-
-  const select = $("senderSelect");
-  const senderType = select?.value || "microsoft";
-  const senderName = senderType === "microsoft" ? "Microsoft Outlook" : "Custom SMTP";
-
-  setActionMessage(`Sending test email via ${senderName}...`, "info");
-
-  try {
-    const d = await api("/api/test-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        to,
-        subject: $("subject").value,
-        body: $("body").value,
-        sampleName: contacts[0]?.name || "Recipient",
-        attachmentIds: selectedAttachments.map(a => a.id),
-        senderType
-      })
-    });
-
-    setActionMessage("✓ " + d.message, "success");
-    toast(d.message, "success");
-  } catch (e) {
-    setActionMessage("✕ " + e.message, "error");
-    toast(e.message, "error");
-    if (senderType === "microsoft" && e.message.includes("not connected")) {
-      setTimeout(() => openMsModal(), 700);
-    }
-  }
-}
-window.sendTest = sendTest;
 
 async function sendCampaignDirect() {
   const ids = selectedIds();
 
-  if (!ids.length) return toast("Select at least one recipient.", "error");
+  if (!ids.length) return toast("Select at least one recipient row.", "error");
   if (!$("subject").value.trim()) return toast("Enter a subject.", "error");
   if (!$("body").value.trim()) return toast("Enter a message body.", "error");
 
+  const subject = $("subject").value;
+  const body = $("body").value;
   const select = $("senderSelect");
   const senderType = select?.value || "microsoft";
   const senderLabel = senderType === "microsoft" ? "Microsoft Outlook" : "Custom SMTP";
 
-  // Warn if PDF folder is active — show how many will be skipped
+  setActionMessage("Validating recipients...", "info");
+
+  try {
+    const validResult = await runValidation(ids, subject, body);
+
+    if (validResult.valid === 0) {
+      setActionMessage("✕ No valid rows to send. Check email addresses.", "error");
+      return toast("No valid rows found. All selected rows have invalid/missing emails.", "error");
+    }
+
+    // Show validation modal — proceed → confirm modal → actual send
+    showValidationModal(validResult, () => {
+      showConfirmModal(validResult, () => doSendCampaign(ids, senderType, senderLabel, validResult));
+    });
+
+    setActionMessage("", "info");
+  } catch (e) {
+    setActionMessage("✕ " + e.message, "error");
+    toast(e.message, "error");
+  }
+}
+window.sendCampaignDirect = sendCampaignDirect;
+
+async function doSendCampaign(ids, senderType, senderLabel, validResult) {
+  const subject = $("subject").value;
+  const body = $("body").value;
+
+  // Warn if PDF folder active
   if (currentPdfFolderId) {
-    const matchable = contacts.filter(c => ids.includes(c.id));
-    if (!confirm(`Send this campaign to ${ids.length} selected recipient${ids.length === 1 ? "" : "s"} via ${senderLabel}?\n\n📂 Personal PDFs are active (${pdfFolderFileNames.length} PDFs uploaded).\nContacts without a matching PDF will be SKIPPED and not sent.\n\nProceed?`)) return;
-  } else {
-    if (!confirm(`Send this campaign to ${ids.length} selected recipient${ids.length === 1 ? "" : "s"} via ${senderLabel} now?`)) return;
+    if (!confirm(`Send campaign to ${validResult.valid} rows via ${senderLabel}?\n\n📂 Personal PDFs are active (${pdfFolderFileNames.length} PDFs). Rows without a matching PDF will be SKIPPED.\n\nProceed?`)) return;
   }
 
   try {
@@ -852,8 +1058,8 @@ async function sendCampaignDirect() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: $("campaignName").value.trim() || "Email Campaign",
-        subject: $("subject").value,
-        body: $("body").value,
+        subject,
+        body,
         selectedIds: ids,
         attachmentIds: selectedAttachments.map(a => a.id),
         senderType,
@@ -863,10 +1069,9 @@ async function sendCampaignDirect() {
       })
     });
 
-    // Show matched/skipped breakdown if PDF folder was used
     if (d.usedPdfFolder) {
       if (d.skippedCount > 0) {
-        toast(`📂 ${d.matchedCount} will be sent · ${d.skippedCount} skipped (no matching PDF found)`, "info");
+        toast(`📂 ${d.matchedCount} will be sent · ${d.skippedCount} skipped (no matching PDF)`, "info");
       } else {
         toast(`📂 All ${d.matchedCount} contacts matched!`, "success");
       }
@@ -874,7 +1079,6 @@ async function sendCampaignDirect() {
 
     currentCampaignId = d.campaignId;
 
-    // Scheduled — don't send now, show confirmation
     if (d.scheduled) {
       const when = new Date(d.scheduledAt).toLocaleString();
       toast(`📅 Campaign scheduled! Will send automatically at ${when}`, "success");
@@ -883,7 +1087,6 @@ async function sendCampaignDirect() {
       return;
     }
 
-    // Check for duplicate loan numbers — show warning modal before sending
     if (d.duplicates && d.duplicates.length > 0) {
       showDuplicateModal(d.duplicates, d.campaignId, senderLabel);
     } else {
@@ -892,12 +1095,12 @@ async function sendCampaignDirect() {
 
   } catch (e) {
     toast(e.message, "error");
+    setActionMessage("✕ " + e.message, "error");
     if (senderType === "microsoft" && e.message.includes("not connected")) {
       setTimeout(() => openMsModal(), 700);
     }
   }
 }
-window.sendCampaignDirect = sendCampaignDirect;
 
 // ── Duplicate Loan Number Modal ───────────────────────────────────────────────
 let _pendingDuplicates = [];
@@ -924,10 +1127,8 @@ async function handleDuplicates(action) {
   $("duplicateModal").classList.add("hidden");
 
   if (action === "deny") {
-    // Collect all recipientIds from the 2nd contact onwards (keep first, skip rest)
     const toSkip = [];
     for (const d of _pendingDuplicates) {
-      // Skip all but the first recipient for each duplicate group
       toSkip.push(...d.recipientIds.slice(1));
     }
     if (toSkip.length) {
@@ -960,6 +1161,49 @@ async function proceedToSend(campaignId, senderLabel) {
   }
 }
 
+// ── Schedule Helpers ──────────────────────────────────────────────────────────
+
+function toggleSchedule() {
+  const on = $("scheduleToggle") && $("scheduleToggle").checked;
+  const box = $("scheduleBox");
+  if (box) box.classList.toggle("hidden", !on);
+  if (on && $("scheduledAt")) {
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    const pad = n => String(n).padStart(2, "0");
+    $("scheduledAt").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+}
+window.toggleSchedule = toggleSchedule;
+
+function getScheduledAt() {
+  if (!$("scheduleToggle") || !$("scheduleToggle").checked) return null;
+  const val = $("scheduledAt") && $("scheduledAt").value;
+  if (!val) return null;
+  return new Date(val).toISOString();
+}
+
+async function removeAttachment(id) {
+  try {
+    await api(`/api/attachments/${id}`, { method: "DELETE" });
+    selectedAttachments = selectedAttachments.filter(a => a.id !== id);
+    renderAttachments();
+    toast("Attachment removed.", "success");
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+window.removeAttachment = removeAttachment;
+
+const attachmentInput = $("attachmentInput");
+const attachmentDropzone = $("attachmentDropzone");
+attachmentInput.addEventListener("change", () => { uploadAttachments(attachmentInput.files); attachmentInput.value = ""; });
+["dragenter", "dragover"].forEach(ev => attachmentDropzone.addEventListener(ev, e => { e.preventDefault(); attachmentDropzone.classList.add("drag"); }));
+["dragleave", "drop"].forEach(ev => attachmentDropzone.addEventListener(ev, e => { e.preventDefault(); attachmentDropzone.classList.remove("drag"); }));
+attachmentDropzone.addEventListener("click", () => attachmentInput.click());
+attachmentDropzone.addEventListener("drop", e => uploadAttachments(e.dataTransfer.files));
+renderAttachments();
+
+// ── Campaign History ──────────────────────────────────────────────────────────
 
 function statusBadge(status) {
   const s = String(status || "").toLowerCase();
@@ -985,8 +1229,9 @@ async function loadCampaigns() {
         <td>${new Date(c.created_at + "Z").toLocaleDateString()}</td>
         <td style="display:flex;gap:5px;flex-wrap:wrap">
           <button class="btn small outline" onclick="openCampaign(${c.id})">View</button>
-          <button class="btn small outline" onclick="downloadReport(${c.id})" title="Download full report (Sent + Undeliverable)">⬇ Report</button>
-          ${Number(c.skipped || 0) > 0 ? `<button class="btn small outline skipped-dl-btn" onclick="downloadSkipped(${c.id})" title="Download not-sent contacts as Excel">⬇ Not Sent</button>` : ""}
+          <button class="btn small outline" onclick="downloadReport(${c.id})" title="Download full report">⬇ Report</button>
+          ${c.failed > 0 ? `<button class="btn small outline failed-dl-btn" onclick="downloadFailed(${c.id})" title="Download failed records">⬇ Failed</button>` : ""}
+          ${Number(c.skipped || 0) > 0 ? `<button class="btn small outline skipped-dl-btn" onclick="downloadSkipped(${c.id})" title="Download not-sent contacts">⬇ Not Sent</button>` : ""}
         </td>
       </tr>
     `).join("") || `<tr><td colspan="8" class="empty">No campaigns yet.</td></tr>`;
@@ -1018,14 +1263,19 @@ async function openCampaign(id, scroll = true) {
     renderRecipients(d.recipients);
     renderCampaignAttachments(d.attachments || []);
 
-    // Show skipped stat and download button if any were skipped
+    // Show failed download button if any failed
+    const failedCount = Number(d.campaign.failed || 0);
+    const failedBtn = $("downloadFailedBtn");
+    if (failedBtn) failedBtn.classList.toggle("hidden", failedCount === 0);
+
+    // Show skipped stat and download button
     const skippedCount = Number(d.campaign.skipped || 0);
     const skippedStat = $("skippedStat");
     const dlBtn = $("downloadSkippedBtn");
     if (skippedStat) {
       if (skippedCount > 0) {
         skippedStat.classList.remove("hidden");
-        skippedStat.innerHTML = `⚠️ <b>${skippedCount} contact${skippedCount === 1 ? "" : "s"} skipped</b> — no matching PDF found. Their emails were <b>not sent</b>.`;
+        skippedStat.innerHTML = `⚠️ <b>${skippedCount} row${skippedCount === 1 ? "" : "s"} skipped</b> — no matching PDF or invalid email. Their emails were <b>not sent</b>.`;
         if (dlBtn) dlBtn.classList.remove("hidden");
       } else {
         skippedStat.classList.add("hidden");
@@ -1055,19 +1305,26 @@ function renderRecipients(recipients) {
     const notSent = r.status === "not_sent";
     const statusCls = sent ? "completed" : r.status === "failed" ? "failed" : notSent ? "skipped-badge" : "sending";
     const statusLabel = notSent ? "NOT SENT" : r.status.toUpperCase();
-    const pdfNote = r.pdf_match_status === "skipped" ? '<span class="pdf-skip-note" title="No matching PDF found">📄✕</span>' :
+    const pdfNote = r.pdf_match_status === "skipped" ? '<span class="pdf-skip-note" title="No matching PDF / invalid email">📄✕</span>' :
                     r.pdf_match_status === "matched" ? '<span class="pdf-skip-note" title="Personal PDF attached">📄✓</span>' : "";
+
+    // Parse To emails for display
+    const toStr = r.to_emails || r.email || "";
+    const toDisplay = toStr.split(",").map(s => s.trim()).filter(Boolean).join(", ") || r.email || "—";
+    const ccStr = r.cc ? r.cc.split(";").filter(Boolean).join(", ") : "—";
+
     return `
       <tr class="${notSent ? "row-not-sent" : ""}">
         <td>${i + 1}</td>
         <td><b>${esc(r.name)}</b>${pdfNote}</td>
-        <td>${esc(r.email)}</td>
+        <td class="to-emails-cell">${esc(toDisplay)}</td>
+        <td class="muted">${esc(ccStr)}</td>
         <td><span class="status ${statusCls}">${esc(statusLabel)}</span></td>
-        <td class="${r.status === "failed" ? "error-cell" : "muted"}">${notSent ? "No matching PDF in folder" : esc(r.error || "—")}</td>
+        <td class="${r.status === "failed" ? "error-cell" : "muted"}">${notSent ? "Not sent — no matching PDF or invalid email" : esc(r.error || "—")}</td>
         <td>${r.sent_at ? new Date(r.sent_at + "Z").toLocaleString() : "—"}</td>
       </tr>
     `;
-  }).join("") || `<tr><td colspan="6" class="empty">No recipient details available.</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="empty">No recipient details available.</td></tr>`;
 }
 
 function updateProgress(p) {
@@ -1081,6 +1338,18 @@ function updateProgress(p) {
   $("progressBar").style.width = `${pct}%`;
 }
 
+function downloadFailed(campaignId) {
+  if (!campaignId) return toast("No campaign selected.", "error");
+  const a = document.createElement("a");
+  a.href = `/api/campaigns/${campaignId}/failed/export`;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+window.downloadFailed = downloadFailed;
+
 function downloadSkipped(campaignId) {
   if (!campaignId) return toast("No campaign selected.", "error");
   const a = document.createElement("a");
@@ -1093,7 +1362,17 @@ function downloadSkipped(campaignId) {
 }
 window.downloadSkipped = downloadSkipped;
 
-
+function downloadReport(campaignId) {
+  if (!campaignId) return toast("No campaign selected.", "error");
+  const a = document.createElement("a");
+  a.href = `/api/campaigns/${campaignId}/report`;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+window.downloadReport = downloadReport;
 
 async function pollProgress(id) {
   const tick = async () => {
@@ -1217,7 +1496,71 @@ async function deleteTemplate(id) {
 }
 window.deleteTemplate = deleteTemplate;
 
-// ── Simple Email Provider Setup (replaces Azure OAuth) ───────────────────────
+// ── Sender Check ──────────────────────────────────────────────────────────────
+
+async function checkCurrentSender() {
+  const select = $("senderSelect");
+  const senderType = select?.value || "microsoft";
+  setActionMessage("Checking sender connection...", "info");
+
+  try {
+    if (senderType === "microsoft") {
+      const d = await api("/api/microsoft/check", { method: "POST" });
+      setActionMessage(`✓ Microsoft Outlook connected as ${d.email} (${d.name || "Verified"})`, "success");
+      toast(`Outlook verified: ${d.email}`, "success");
+    } else {
+      const d = await api("/api/test-smtp", { method: "POST" });
+      setActionMessage("✓ " + d.message, "success");
+      toast(d.message, "success");
+    }
+  } catch (e) {
+    setActionMessage("✕ " + e.message, "error");
+    toast(e.message, "error");
+    if (senderType === "microsoft" && e.message.includes("not connected")) {
+      setTimeout(() => openMsModal(), 700);
+    }
+  }
+}
+window.checkCurrentSender = checkCurrentSender;
+window.checkSMTP = checkCurrentSender;
+
+async function sendTest() {
+  const to = $("testEmail").value.trim();
+  if (!to) return toast("Enter a test email address first.", "error");
+
+  const select = $("senderSelect");
+  const senderType = select?.value || "microsoft";
+  const senderName = senderType === "microsoft" ? "Microsoft Outlook" : "Custom SMTP";
+
+  setActionMessage(`Sending test email via ${senderName}...`, "info");
+
+  try {
+    const d = await api("/api/test-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to,
+        subject: $("subject").value,
+        body: $("body").value,
+        sampleName: contacts[0]?.name || "Recipient",
+        attachmentIds: selectedAttachments.map(a => a.id),
+        senderType
+      })
+    });
+    setActionMessage("✓ " + d.message, "success");
+    toast(d.message, "success");
+  } catch (e) {
+    setActionMessage("✕ " + e.message, "error");
+    toast(e.message, "error");
+    if (senderType === "microsoft" && e.message.includes("not connected")) {
+      setTimeout(() => openMsModal(), 700);
+    }
+  }
+}
+window.sendTest = sendTest;
+
+// ── SMTP Provider / OTP setup ─────────────────────────────────────────────────
+
 const SMTP_PROVIDERS = {
   outlook: { host: "smtp.office365.com", port: "587", secure: "false" },
   gmail:   { host: "smtp.gmail.com",      port: "587", secure: "false" },
@@ -1226,7 +1569,6 @@ const SMTP_PROVIDERS = {
 };
 let _activeProvider = "outlook";
 
-// Tab switcher for Simple / OAuth
 function switchSetupTab(tab) {
   $("tabSimple").classList.toggle("active", tab === "simple");
   $("tabOauth").classList.toggle("active", tab === "oauth");
@@ -1244,12 +1586,10 @@ function pickProvider(p) {
   const otherHost = $("provOtherHost");
   if (otherHost) otherHost.classList.toggle("hidden", p !== "other");
 
-  // Update email placeholder
   const placeholders = { outlook:"yourname@outlook.com", gmail:"yourname@gmail.com", yahoo:"yourname@yahoo.com", other:"yourname@yourdomain.com" };
   const inp = $("quickSmtpUser");
   if (inp) inp.placeholder = placeholders[p] || "your@email.com";
 
-  // Update App Password guide
   const guides = {
     outlook: {
       title: "How to get an Outlook App Password:",
@@ -1275,10 +1615,7 @@ function pickProvider(p) {
               "Select <b>Other app</b>, name it SmartMail",
               "Copy the password and paste above"]
     },
-    other: {
-      title: "Custom SMTP — enter host above and use your email password.",
-      steps: []
-    }
+    other: { title: "Custom SMTP — enter host above and use your email password.", steps: [] }
   };
   const g = guides[p] || guides.outlook;
   const title = $("appPwdGuideTitle");
@@ -1297,38 +1634,25 @@ async function quickSmtpSendOtp() {
     ? ($("smtpCustomHost").value.trim() || "")
     : provider.host;
 
-  if (!email || !email.includes("@")) {
-    msg.textContent = "Please enter a valid email address.";
-    msg.style.color = "#ef4444"; return;
-  }
-  if (!pass) {
-    msg.textContent = "Please enter your password.";
-    msg.style.color = "#ef4444"; return;
-  }
-  if (_activeProvider === "other" && !host) {
-    msg.textContent = "Please enter the SMTP host.";
-    msg.style.color = "#ef4444"; return;
-  }
+  if (!email || !email.includes("@")) { msg.textContent = "Please enter a valid email address."; msg.style.color = "#ef4444"; return; }
+  if (!pass) { msg.textContent = "Please enter your password."; msg.style.color = "#ef4444"; return; }
+  if (_activeProvider === "other" && !host) { msg.textContent = "Please enter the SMTP host."; msg.style.color = "#ef4444"; return; }
 
-  msg.textContent = "Connecting and sending code…";
-  msg.style.color = "#6b7280";
+  msg.textContent = "Connecting and sending code…"; msg.style.color = "#6b7280";
 
   try {
-    // Save SMTP host/port/secure first
     await api("/api/smtp-settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host, port: provider.port, secure: provider.secure })
     });
 
-    // Then fire OTP using those credentials
     const r = await api("/api/smtp-verify/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, pass, fromName: "" })
     });
 
-    // Close this modal, open OTP code entry step
     closeMsModal();
     _smtpOtpEmail = email;
     $("smtpOtpTargetEmail").textContent = email;
@@ -1346,23 +1670,8 @@ async function quickSmtpSendOtp() {
 }
 window.quickSmtpSendOtp = quickSmtpSendOtp;
 
-// Stub old MS functions so no JS errors
-function openMsModal() {
-  $("msModal").classList.remove("hidden");
-  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
-  // Auto-fill the correct redirect URI based on current URL
-  const base = window.location.origin;
-  const redirectUri = base + "/auth/microsoft/callback";
-  const el = $("redirectUriDisplay");
-  if (el) el.textContent = redirectUri;
-}
-function closeMsModal() {
-  $("msModal").classList.add("hidden");
-  $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
-}
-function saveMsConfig(e) { if(e) e.preventDefault(); }
+function saveMsConfig(e) { if (e) e.preventDefault(); }
 function disconnectMicrosoft() {}
-function checkCurrentSender() {}
 function copyRedirectUri() {
   const txt = $("redirectUriDisplay") ? $("redirectUriDisplay").textContent : "";
   if (!txt || txt === "loading...") return;
@@ -1372,10 +1681,8 @@ function validateClientId(input) {
   const val = (input.value || "").trim();
   const warn = $("oauthWarning");
   if (!warn) return;
-  // Show warning if value starts with api:// or looks like an App ID URI
   if (val.startsWith("api://") || val.startsWith("https://")) {
     warn.classList.remove("hidden");
-    // Auto-fix: strip the api:// prefix
     const uuid = val.replace(/^api:\/\//, "").replace(/^https?:\/\/[^/]+\//, "");
     if (uuid !== val) input.value = uuid;
   } else {
@@ -1390,7 +1697,7 @@ window.checkCurrentSender = checkCurrentSender;
 window.copyRedirectUri = copyRedirectUri;
 window.validateClientId = validateClientId;
 
-// ── Switch Mail (topbar button) ───────────────────────────────────────────────
+// ── Switch Mail Modal ─────────────────────────────────────────────────────────
 let _smtpOtpEmail = "";
 
 function openSmtpOtpModal() {
@@ -1417,25 +1724,16 @@ function smtpOtpBack() {
 }
 window.smtpOtpBack = smtpOtpBack;
 
-// Step 1 — send OTP using the entered credentials to test them
 async function smtpSendOtp() {
   const email    = $("smtpUser").value.trim();
   const pass     = $("smtpPass").value.trim();
   const fromName = $("smtpFromName").value.trim();
-
   const msg1 = $("smtpOtpMsg1");
 
-  if (!email || !email.includes("@")) {
-    msg1.textContent = "Please enter a valid email address.";
-    msg1.style.color = "#ef4444"; return;
-  }
-  if (!pass) {
-    msg1.textContent = "Please enter your App Password.";
-    msg1.style.color = "#ef4444"; return;
-  }
+  if (!email || !email.includes("@")) { msg1.textContent = "Please enter a valid email address."; msg1.style.color = "#ef4444"; return; }
+  if (!pass) { msg1.textContent = "Please enter your App Password."; msg1.style.color = "#ef4444"; return; }
 
-  msg1.textContent = "Connecting to Outlook and sending code…";
-  msg1.style.color = "#6b7280";
+  msg1.textContent = "Connecting to Outlook and sending code…"; msg1.style.color = "#6b7280";
 
   try {
     const r = await api("/api/smtp-verify/send-otp", {
@@ -1458,18 +1756,13 @@ async function smtpSendOtp() {
 }
 window.smtpSendOtp = smtpSendOtp;
 
-// Step 2 — verify code → save new SMTP → update topbar tag
 async function smtpConfirmOtp() {
   const otp  = $("smtpOtpCode").value.trim();
   const msg2 = $("smtpOtpMsg2");
 
-  if (!otp || otp.length < 4) {
-    msg2.textContent = "Please enter the 6-digit code from your inbox.";
-    msg2.style.color = "#ef4444"; return;
-  }
+  if (!otp || otp.length < 4) { msg2.textContent = "Please enter the 6-digit code from your inbox."; msg2.style.color = "#ef4444"; return; }
 
-  msg2.textContent = "Verifying…";
-  msg2.style.color = "#6b7280";
+  msg2.textContent = "Verifying…"; msg2.style.color = "#6b7280";
 
   try {
     const r = await api("/api/smtp-verify/confirm-otp", {
@@ -1478,7 +1771,6 @@ async function smtpConfirmOtp() {
       body: JSON.stringify({ email: _smtpOtpEmail, otp })
     });
 
-    // Update "Switch Mail" topbar tag to show active sender
     const tag = $("activeSenderTag");
     if (tag) {
       tag.textContent = _smtpOtpEmail;

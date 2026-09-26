@@ -93,6 +93,8 @@ try { db.exec("ALTER TABLE campaigns ADD COLUMN skipped INTEGER DEFAULT 0"); } c
 try { db.exec("ALTER TABLE campaigns ADD COLUMN delay_seconds INTEGER DEFAULT 5"); } catch {}
 try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN pdf_match_status TEXT DEFAULT 'na'"); } catch {}
 try { db.prepare("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT").run(); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN to_emails TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN cc TEXT DEFAULT ''"); } catch {}
 
 
 db.exec(`
@@ -186,11 +188,17 @@ function findPdfForRecipient(folderPath, recipientName) {
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.set("trust proxy", 1); // Required for Render/Heroku — tells Express the X-Forwarded-Proto header is trustworthy
 app.use(session({
-  secret: process.env.SESSION_SECRET || "dev-only-change-me",
+  secret: process.env.SESSION_SECRET || "dev-only-change-me-not-for-production",
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: "lax", maxAge: 8 * 60 * 60 * 1000 }
+  cookie: {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 8 * 60 * 60 * 1000,                          // 8 hours
+    secure: process.env.NODE_ENV === "production"          // HTTPS-only on Render
+  }
 }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -199,10 +207,12 @@ function auth(req, res, next) {
   next();
 }
 
+
 function normalizeKey(k) {
   return String(k || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Find a value in a row object by trying multiple normalized key aliases
 function pick(row, names) {
   const keys = Object.keys(row);
   for (const wanted of names) {
@@ -228,19 +238,57 @@ function getContacts() {
   });
 }
 
+// Fully dynamic, case-insensitive template rendering.
+// Builds a lookup table: normalizedKey → value, then replaces every
+// {{variable}} in the template regardless of case or spacing.
 function renderTemplate(template, contact) {
   let out = String(template || "");
-  const values = { ...contact };
-  let extras = {};
-  try { extras = JSON.parse(contact.extra_json || "{}"); } catch {}
-  Object.assign(values, extras);
 
-  for (const [key, value] of Object.entries(values)) {
-    const safe = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    out = out.replace(new RegExp("\\{\\{" + safe + "\\}\\}", "gi"), String(value ?? ""));
-  }
+  // Build a flat map of ALL fields: normalizedKey → value
+  const valueMap = new Map();
+  const addToMap = (obj) => {
+    for (const [key, value] of Object.entries(obj || {})) {
+      if (key === "extra_json") continue;
+      valueMap.set(normalizeKey(key), String(value ?? ""));
+    }
+  };
+
+  addToMap(contact);
+  // Also expand extra_json fields
+  try { addToMap(JSON.parse(contact.extra_json || "{}")); } catch {}
+
+  // Replace every {{...}} with the matched value (case-insensitive)
+  out = out.replace(/\{\{([^}]+)\}\}/g, (match, varName) => {
+    const key = normalizeKey(varName);
+    return valueMap.has(key) ? valueMap.get(key) : match; // keep original if not found
+  });
+
   return out;
 }
+
+// Returns a list of unresolved variables in a template given a contact
+function findUnknownVariables(template, contact) {
+  const valueMap = new Set();
+  const addToMap = (obj) => {
+    for (const key of Object.keys(obj || {})) {
+      if (key === "extra_json") continue;
+      valueMap.add(normalizeKey(key));
+    }
+  };
+  addToMap(contact);
+  try { addToMap(JSON.parse(contact.extra_json || "{}")); } catch {}
+
+  const unknowns = [];
+  const matches = String(template || "").matchAll(/\{\{([^}]+)\}\}/g);
+  for (const m of matches) {
+    if (!valueMap.has(normalizeKey(m[1]))) {
+      unknowns.push(m[0]);
+    }
+  }
+  return [...new Set(unknowns)];
+}
+
+
 
 function getAttachmentRecords(ids) {
   if (!Array.isArray(ids) || !ids.length) return [];
@@ -339,7 +387,7 @@ async function getValidMicrosoftAccessToken() {
   return tokens.access_token;
 }
 
-async function sendMailViaMicrosoftGraph({ to, subject, body, attachments = [] }) {
+async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, attachments = [] }) {
   const accessToken = await getValidMicrosoftAccessToken();
 
   const graphAttachments = [];
@@ -358,6 +406,23 @@ async function sendMailViaMicrosoftGraph({ to, subject, body, attachments = [] }
 
   const isHtml = /<[a-z][\s\S]*>/i.test(body);
 
+  // Build To recipients — support array (new multi-email) or legacy single string
+  const toList = Array.isArray(toEmails) && toEmails.length
+    ? toEmails
+    : (to ? String(to).split(",").map(s => s.trim()).filter(Boolean) : []);
+
+  const toRecipients = toList.filter(validEmail).map(addr => ({
+    emailAddress: { address: addr }
+  }));
+
+  if (!toRecipients.length) {
+    throw new Error("No valid To recipients for this email.");
+  }
+
+  // Build CC recipients
+  const ccList = String(cc || "").split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s));
+  const ccRecipients = ccList.map(addr => ({ emailAddress: { address: addr } }));
+
   const payload = {
     message: {
       subject: String(subject || ""),
@@ -365,13 +430,8 @@ async function sendMailViaMicrosoftGraph({ to, subject, body, attachments = [] }
         contentType: isHtml ? "HTML" : "Text",
         content: String(body || "")
       },
-      toRecipients: [
-        {
-          emailAddress: {
-            address: String(to).trim()
-          }
-        }
-      ],
+      toRecipients,
+      ccRecipients,
       attachments: graphAttachments
     },
     saveToSentItems: true
@@ -430,22 +490,35 @@ ${paragraphs}
 }
 
 // Build anti-spam compliant mail options for SMTP
-function buildSmtpMailOptions({ from, to, subject, body, attachments = [] }) {
-  const fromName = process.env.MAIL_FROM_NAME || process.env.SMTP_USER || "SmartMail";
-  const fromAddr = process.env.MAIL_FROM || process.env.SMTP_USER;
+function buildSmtpMailOptions({ from, to, toEmails, cc, subject, body, attachments = [] }) {
+  const fromName = getSetting("smtp_from_name") || process.env.MAIL_FROM_NAME || process.env.SMTP_USER || "SmartMail";
+  const fromAddr = getSetting("smtp_from") || process.env.MAIL_FROM || process.env.SMTP_USER;
   const isHtml = /^<!DOCTYPE|^<html/i.test(String(body || "").trim());
   const htmlBody = isHtml ? body : textToHtml(body);
   const textBody = isHtml
     ? String(body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
     : String(body || "");
 
+  // Build To — support array (multi-email) or single string
+  const toList = Array.isArray(toEmails) && toEmails.length
+    ? toEmails.filter(validEmail)
+    : (to ? String(to).split(",").map(s => s.trim()).filter(s => s && validEmail(s)) : []);
+
+  if (!toList.length) throw new Error("No valid To recipients for this email.");
+
+  const toField = toList.join(", ");
+
+  // Build CC
+  const ccList = String(cc || "").split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s));
+  const ccField = ccList.length ? ccList.join(", ") : undefined;
+
   const domain = (fromAddr || "").split("@")[1] || "localhost";
   const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@${domain}>`;
 
-  return {
+  const opts = {
     from: `"${fromName}" <${fromAddr}>`,
     replyTo: fromAddr,
-    to,
+    to: toField,
     subject,
     text: textBody,
     html: htmlBody,
@@ -458,7 +531,10 @@ function buildSmtpMailOptions({ from, to, subject, body, attachments = [] }) {
       "List-Unsubscribe": `<mailto:${fromAddr}?subject=Unsubscribe>`
     }
   };
+  if (ccField) opts.cc = ccField;
+  return opts;
 }
+
 
 
 let sendLock = false;
@@ -792,6 +868,18 @@ app.post("/api/upload", auth, spreadsheetUpload.single("file"), (req, res) => {
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
     if (!rows.length) throw new Error("The first sheet is empty.");
 
+    // Collect all unique column headers from the Excel file (for dynamic variables)
+    const allHeaders = [];
+    const seenHeaders = new Set();
+    for (const row of rows) {
+      for (const key of Object.keys(row)) {
+        if (!seenHeaders.has(key)) {
+          seenHeaders.add(key);
+          allHeaders.push(key);
+        }
+      }
+    }
+
     const insert = db.prepare(`
       INSERT INTO contacts (name,email,number,details,extra_json)
       VALUES (?,?,?,?,?)
@@ -803,41 +891,71 @@ app.post("/api/upload", auth, spreadsheetUpload.single("file"), (req, res) => {
       clear.run();
       let added = 0;
       let invalid = 0;
-      const seen = new Set();
+      let invalidNoEmail = 0;
 
-      const known = new Set([
-        "name", "fullname", "full name",
-        "loan number", "loannumber", "loan_number", "loanno", "loan no",
-        "email", "mail", "email address", "emailaddress",
-        "number", "phone", "mobile", "phone number", "mobile number",
-        "details", "detail", "description",
-        "branch", "branch name", "branchname"
-      ].map(normalizeKey));
+      for (let rowIdx = 0; rowIdx < items.length; rowIdx++) {
+        const row = items[rowIdx];
 
-      for (const row of items) {
-        const name = String(pick(row, ["loan number", "loannumber", "loan_number", "loanno", "loan no", "name", "full name", "fullname"]) || "").trim();
-        const email = cleanEmail(pick(row, ["email", "mail", "email address", "emailaddress"]));
-        const number = String(pick(row, ["number", "phone", "mobile", "phone number", "mobile number"]) || "").trim();
-        const details = String(pick(row, ["details", "detail", "description"]) || "").trim();
-        const branch = String(pick(row, ["branch", "branch name", "branchname"]) || "").trim();
+        // ── Determine row identifier (name / loan number) ──
+        const name = String(
+          pick(row, ["loan number","loannumber","loan_number","loanno","loan no","name","full name","fullname","customer name","customername"]) || ""
+        ).trim() || `Row ${rowIdx + 1}`;
 
-        if (!name || !email || !validEmail(email) || seen.has(email)) {
-          invalid++;
-          continue;
+        // ── Collect Email1..Email9 ──
+        const emailCols = [];
+        for (let i = 1; i <= 9; i++) {
+          const val = cleanEmail(pick(row, [`email${i}`, `email ${i}`, `e-mail${i}`, `e-mail ${i}`]));
+          if (val) emailCols.push(val);
+        }
+        // Fallback: if no EmailN columns, try plain "email"/"mail" column
+        if (!emailCols.length) {
+          const fallback = cleanEmail(pick(row, ["email","mail","email address","emailaddress"]));
+          if (fallback) emailCols.push(fallback);
         }
 
-        seen.add(email);
+        // Filter to valid emails
+        const validEmails = emailCols.filter(validEmail);
+
+        // ── CC column ──
+        const ccRaw = String(pick(row, ["cc","carbon copy","carboncopy"]) || "").trim();
+        const ccEmails = ccRaw
+          ? ccRaw.split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s))
+          : [];
+
+        // ── Other standard fields ──
+        const number = String(pick(row, ["number","phone","mobile","phone number","mobile number"]) || "").trim();
+        const details = String(pick(row, ["details","detail","description"]) || "").trim();
+
+        // ── Store ALL columns in extra_json (for dynamic variables) ──
+        // Every column header becomes a variable, including Email1, Email2, CC, etc.
         const extras = {};
-        if (branch) extras["branch"] = branch;
         for (const [k, v] of Object.entries(row)) {
-          if (!known.has(normalizeKey(k))) extras[k] = v;
+          extras[k] = v == null ? "" : String(v);
+        }
+        // Also store structured email list and cc for campaign processing
+        extras["__emails"] = JSON.stringify(validEmails);
+        extras["__cc"] = ccEmails.join(";");
+        extras["__allEmails"] = validEmails.join(",");
+        extras["__hasValidEmail"] = String(validEmails.length > 0);
+
+        // Primary email = Email1 (first valid email)
+        const primaryEmail = validEmails[0] || "";
+
+        // ── Validation flag ──
+        if (!validEmails.length) {
+          // Row has no valid email — keep it visible but mark as invalid
+          extras["__invalid"] = "No valid email recipient";
+          invalidNoEmail++;
         }
 
-        insert.run(name, email, number, details, JSON.stringify(extras));
-        added++;
+        // Note: we insert ALL rows (including those with no valid email)
+        // The __invalid flag controls whether they get sent or not
+        insert.run(name, primaryEmail, number, details, JSON.stringify(extras));
+        if (validEmails.length > 0) added++;
+        else invalid++;
       }
 
-      return { added, invalid };
+      return { added, invalid: invalidNoEmail, total: items.length, headers: allHeaders };
     })(rows);
 
     fs.unlink(req.file.path, () => {});
@@ -847,6 +965,8 @@ app.post("/api/upload", auth, spreadsheetUpload.single("file"), (req, res) => {
     res.status(400).json({ error: e.message });
   }
 });
+
+
 
 app.post("/api/attachments", auth, (req, res) => {
   attachmentUpload.array("files", 8)(req, res, err => {
@@ -1066,12 +1186,13 @@ app.post("/api/campaigns", auth, (req, res) => {
 
   const insert = db.prepare(`
     INSERT INTO campaign_recipients
-    (campaign_id,contact_id,name,email,rendered_subject,rendered_body,status,pdf_match_status)
-    VALUES (?,?,?,?,?,?,?,?)
+    (campaign_id,contact_id,name,email,to_emails,cc,rendered_subject,rendered_body,status,pdf_match_status)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
   `);
 
   let matchedCount = 0;
   let skippedCount = 0;
+  let invalidCount = 0;
 
   const campaignId = db.transaction(() => {
     const id = create.run(
@@ -1091,7 +1212,16 @@ app.post("/api/campaigns", auth, (req, res) => {
       let status = "pending";
       let pdfMatchStatus = "na";
 
-      if (usePdfFolder) {
+      // Extract emails from extra_json
+      let extras = {};
+      try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+
+      // Check if row was flagged invalid (no valid email)
+      if (extras["__invalid"]) {
+        status = "not_sent";
+        pdfMatchStatus = "skipped";
+        invalidCount++;
+      } else if (usePdfFolder) {
         const pdfPath = findPdfForRecipient(pdfFolderPath, c.name);
         if (pdfPath) {
           pdfMatchStatus = "matched";
@@ -1103,11 +1233,22 @@ app.post("/api/campaigns", auth, (req, res) => {
         }
       }
 
+      // Build to_emails: parse from stored __emails or fallback to primary email
+      let toEmails = [];
+      try { toEmails = JSON.parse(extras["__emails"] || "[]"); } catch {}
+      if (!toEmails.length && c.email && validEmail(c.email)) toEmails = [c.email];
+      const toEmailsStr = toEmails.join(",");
+
+      // CC from stored __cc
+      const cc = String(extras["__cc"] || "");
+
       insert.run(
         id,
         c.id,
         c.name,
-        c.email,
+        c.email,     // primary email for display
+        toEmailsStr, // all To emails comma-joined
+        cc,          // CC emails semicolon-joined
         renderTemplate(subject, c),
         renderTemplate(body, c),
         status,
@@ -1115,13 +1256,15 @@ app.post("/api/campaigns", auth, (req, res) => {
       );
     }
 
-    // Update skipped count on the campaign
-    if (skippedCount > 0) {
-      db.prepare("UPDATE campaigns SET skipped=? WHERE id=?").run(skippedCount, id);
+    // Update skipped count on the campaign (includes invalid rows)
+    const totalSkipped = skippedCount + invalidCount;
+    if (totalSkipped > 0) {
+      db.prepare("UPDATE campaigns SET skipped=? WHERE id=?").run(totalSkipped, id);
     }
 
     return id;
   })();
+
 
   const cleanAttachmentIds = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(Number).filter(Number.isInteger))];
   const linkAttachment = db.prepare("INSERT INTO campaign_attachments (campaign_id, attachment_id) VALUES (?,?)");
@@ -1267,23 +1410,37 @@ async function sendCampaign(campaignId) {
 
         let successNote = "";
 
+        // Build the recipients list from to_emails (comma-joined) or fallback to email
+        const toEmailsStr = recipient.to_emails || recipient.email || "";
+        const toEmailsArr = toEmailsStr.split(",").map(s => s.trim()).filter(s => s && validEmail(s));
+        const ccStr = recipient.cc || "";
+
+        if (!toEmailsArr.length) {
+          throw new Error("No valid email address for this recipient.");
+        }
+
+        const toDisplay = toEmailsArr.join(", ");
+
         if (useMicrosoft) {
           const graphResult = await sendMailViaMicrosoftGraph({
-            to: recipient.email,
+            toEmails: toEmailsArr,
+            cc: ccStr,
             subject: recipient.rendered_subject,
             body: recipient.rendered_body,
             attachments: allAttachments
           });
-          successNote = `Sent via Microsoft Outlook (${graphResult.messageId || "Accepted"})`;
+          successNote = `Sent to ${toDisplay}${ccStr ? ` (CC: ${ccStr})` : ""} via Microsoft Outlook (${graphResult.messageId || "Accepted"})`;
         } else {
           const info = await transporter.sendMail(buildSmtpMailOptions({
-            to: recipient.email,
+            toEmails: toEmailsArr,
+            cc: ccStr,
             subject: recipient.rendered_subject,
             body: recipient.rendered_body,
             attachments: allAttachments
           }));
-          successNote = `SMTP accepted. Message ID: ${info.messageId || "created"}`;
+          successNote = `Sent to ${toDisplay}${ccStr ? ` (CC: ${ccStr})` : ""} via SMTP. Message ID: ${info.messageId || "created"}`;
         }
+
 
 
         db.prepare(`
@@ -1368,7 +1525,7 @@ app.get("/api/campaigns/:id", auth, (req, res) => {
   if (!campaign) return res.status(404).json({ error: "Campaign not found." });
 
   const recipients = db.prepare(`
-    SELECT id,name,email,status,error,sent_at,pdf_match_status
+    SELECT id,name,email,to_emails,cc,status,error,sent_at,pdf_match_status
     FROM campaign_recipients
     WHERE campaign_id=?
     ORDER BY id
@@ -1384,6 +1541,99 @@ app.get("/api/campaigns/:id", auth, (req, res) => {
 
   res.json({ campaign, recipients, attachments });
 });
+
+// ── Pre-send validation endpoint ──────────────────────────────────────────────
+app.post("/api/validate-recipients", auth, (req, res) => {
+  const { selectedIds, subject, body } = req.body || {};
+
+  let contacts = getContacts();
+  if (Array.isArray(selectedIds) && selectedIds.length) {
+    const ids = new Set(selectedIds.map(Number));
+    contacts = contacts.filter(c => ids.has(c.id));
+  }
+
+  const rows = contacts.map(c => {
+    let extras = {};
+    try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
+
+    let toEmails = [];
+    try { toEmails = JSON.parse(extras["__emails"] || "[]"); } catch {}
+    if (!toEmails.length && c.email && validEmail(c.email)) toEmails = [c.email];
+
+    const cc = String(extras["__cc"] || "");
+    const invalid = extras["__invalid"] || null;
+
+    const issues = [];
+    if (invalid) issues.push(invalid);
+
+    // Check for unknown variables in subject and body
+    const unknownSubj = subject ? findUnknownVariables(subject, c) : [];
+    const unknownBody = body ? findUnknownVariables(body, c) : [];
+    const allUnknown = [...new Set([...unknownSubj, ...unknownBody])];
+    if (allUnknown.length) {
+      issues.push(`Unknown variable(s): ${allUnknown.join(", ")}`);
+    }
+
+    return {
+      id: c.id,
+      name: c.name,
+      toEmails,
+      cc,
+      issues,
+      valid: issues.length === 0 && toEmails.length > 0
+    };
+  });
+
+  const valid = rows.filter(r => r.valid).length;
+  const invalid = rows.filter(r => !r.valid).length;
+  const missingEmail = rows.filter(r => r.toEmails.length === 0).length;
+
+  res.json({ total: contacts.length, valid, invalid, missingEmail, rows });
+});
+
+// ── Download failed recipients as Excel ───────────────────────────────────────
+app.get("/api/campaigns/:id/failed/export", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  const failed = db.prepare(`
+    SELECT cr.name, cr.email, cr.to_emails, cr.cc, cr.status, cr.error
+    FROM campaign_recipients cr
+    WHERE cr.campaign_id=? AND cr.status='failed'
+    ORDER BY cr.id
+  `).all(req.params.id);
+
+  if (!failed.length) {
+    return res.status(404).json({ error: "No failed recipients found for this campaign." });
+  }
+
+  const wsData = [
+    ["Loan Number / Name", "Primary Email", "All To Emails", "CC", "Status", "Failure Reason"],
+    ...failed.map(r => [
+      r.name || "",
+      r.email || "",
+      r.to_emails || "",
+      r.cc || "",
+      r.status || "failed",
+      r.error || "Unknown error"
+    ])
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  ws["!cols"] = [20, 30, 40, 30, 12, 50].map(w => ({ wch: w }));
+  XLSX.utils.book_append_sheet(wb, ws, "Failed");
+
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  const safeName = (campaign.name || "campaign").replace(/[^a-z0-9]/gi, "_").slice(0, 40);
+  const filename = `failed-${safeName}-${campaign.id}.xlsx`;
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
+});
+
+
 
 // Download skipped (not sent) contacts as Excel
 app.get("/api/campaigns/:id/skipped/export", auth, (req, res) => {

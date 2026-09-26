@@ -5,4 +5,8 @@ data/*.db-shm
 data/*.db-wal
 uploads/*
 !uploads/.gitkeep
+!uploads/attachments/.gitkeep
+!uploads/pdf-folders/.gitkeep
 npm-debug.log*
+test_contacts.xlsx
+*.xlsx~

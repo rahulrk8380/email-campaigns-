@@ -102,25 +102,25 @@
           <div class="panel">
             <div class="panel-head"><div><h3>How it works</h3><p>Simple enough for first-time users, powerful enough for campaigns.</p></div></div>
             <div class="steps">
-              <div><b>01</b><span><strong>Upload</strong> Excel, CSV or XLS with Name and Email.</span></div>
-              <div><b>02</b><span><strong>Write once</strong> and personalize with variables.</span></div>
-              <div><b>03</b><span><strong>Test</strong> your message before sending.</span></div>
-              <div><b>04</b><span><strong>Send</strong> to selected contacts and track each result.</span></div>
+              <div><b>01</b><span><strong>Upload</strong> Excel, CSV or XLS with Email1, Email2, Email3, CC columns.</span></div>
+              <div><b>02</b><span><strong>Write once</strong> and personalize with any Excel column as a variable.</span></div>
+              <div><b>03</b><span><strong>Validate</strong> and preview your message before sending.</span></div>
+              <div><b>04</b><span><strong>Send</strong> one email per row — each with all its recipients in To &amp; CC.</span></div>
             </div>
           </div>
           <div class="panel">
-            <div class="panel-head"><div><h3>Supported variables</h3><p>Use Excel data inside your subject and message.</p></div></div>
+            <div class="panel-head"><div><h3>Dynamic variables</h3><p>Any Excel column heading becomes a variable automatically.</p></div></div>
             <div class="chips">
-              <span>{{name}}</span><span>{{email}}</span><span>{{number}}</span><span>{{details}}</span><span>{{your_column}}</span>
+              <span>{{Loan Number}}</span><span>{{Customer Name}}</span><span>{{Branch}}</span><span>{{EMI Amount}}</span><span>{{Due Date}}</span>
             </div>
-            <div class="info-box">Extra Excel columns are automatically available by their column name.</div>
+            <div class="info-box">Every Excel column heading is automatically an available variable. Upload your file and the variable list updates instantly — no developer needed.</div>
           </div>
         </div>
       </section>
 
       <section id="contactsPage" class="page hidden">
         <div class="page-intro">
-          <div><h3>Contacts</h3><p>Upload a spreadsheet and choose exactly who should receive your campaign.</p></div>
+          <div><h3>Contacts</h3><p>Upload a spreadsheet with Email1–Email3 and CC columns. Every row becomes one email.</p></div>
           <div class="intro-actions">
             <button class="btn outline" onclick="clearContacts()">Clear list</button>
             <button class="btn primary" onclick="showPage('compose')">Compose email →</button>
@@ -128,7 +128,7 @@
         </div>
 
         <div class="panel upload-panel">
-          <div class="panel-head"><div><h3>Upload Excel</h3><p>Accepted: .xlsx, .xls, .csv • maximum 10 MB</p></div></div>
+          <div class="panel-head"><div><h3>Upload Excel</h3><p>Accepted: .xlsx, .xls, .csv • maximum 10 MB • Columns: Loan Number, Email1, Email2, Email3, CC, etc.</p></div></div>
           <div id="dropzone" class="dropzone">
             <div class="upload-icon">↑</div>
             <strong>Drop your Excel file here</strong>
@@ -138,6 +138,19 @@
           <div id="uploadResult" class="upload-result"></div>
         </div>
 
+        <!-- Available Variables panel — shown after upload -->
+        <div id="availableVarsPanel" class="panel hidden">
+          <div class="panel-head">
+            <div><h3>📋 Available Variables</h3><p>Click any variable to insert it into the Subject or Body field.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;font-size:10px;color:var(--muted)">
+              Insert into:
+              <label class="var-target-radio"><input type="radio" name="varTarget" value="subject"> Subject</label>
+              <label class="var-target-radio"><input type="radio" name="varTarget" value="body" checked> Body</label>
+            </div>
+          </div>
+          <div id="availableVarsChips" class="available-vars-chips"></div>
+        </div>
+
         <div class="panel">
           <div class="panel-head">
             <div><h3>Contact preview</h3><p id="contactCount">0 contacts</p></div>
@@ -145,7 +158,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th></th><th>#</th><th>Loan Number</th><th>Email</th><th>Phone</th><th>Branch</th><th>Details</th><th>Status</th></tr></thead>
+              <thead><tr><th></th><th>#</th><th>Loan Number / Name</th><th>Primary Email (To)</th><th>Additional Recipients</th><th>CC</th><th>Status</th></tr></thead>
               <tbody id="contactsTable"></tbody>
             </table>
           </div>
@@ -154,8 +167,8 @@
 
       <section id="composePage" class="page hidden">
         <div class="page-intro">
-          <div><h3>Compose campaign</h3><p>Write one message and SmartMail personalizes it for every selected recipient.</p></div>
-          <div class="recipient-summary"><span id="selectedCount">0</span> recipients selected</div>
+          <div><h3>Compose campaign</h3><p>Write one message. SmartMail sends one email per row with all recipients in To and CC.</p></div>
+          <div class="recipient-summary"><span id="selectedCount">0</span> rows selected</div>
         </div>
 
         <div class="compose-grid">
@@ -172,22 +185,18 @@
             </div>
 
             <label>Campaign name
-              <input id="campaignName" placeholder="e.g. Internship Update">
+              <input id="campaignName" placeholder="e.g. Loan Reminder - September">
             </label>
             <label>Subject
-              <input id="subject" placeholder="Hello {{name}} — Important Update">
+              <input id="subject" placeholder="Loan {{Loan Number}} - {{Customer Name}}">
             </label>
             <label>Message body
-              <textarea id="body" rows="11" placeholder="Hi {{name}},&#10;&#10;Write your message here...&#10;&#10;Regards,&#10;Your Team"></textarea>
+              <textarea id="body" rows="11" placeholder="Dear {{Customer Name}},&#10;&#10;Your loan {{Loan Number}} at {{Branch}} branch...&#10;&#10;Regards,&#10;Your Team"></textarea>
             </label>
 
-            <div class="variable-bar">
-              <span>Insert:</span>
-              <button onclick="insertVar('{{name}}')">{{name}}</button>
-              <button onclick="insertVar('{{email}}')">{{email}}</button>
-              <button onclick="insertVar('{{number}}')">{{number}}</button>
-              <button onclick="insertVar('{{details}}')">{{details}}</button>
-              <button onclick="insertVar('{{branch}}')">{{branch}}</button>
+            <!-- Variable insertion bar — dynamically populated from Excel headers -->
+            <div class="variable-bar" id="variableBar">
+              <span>Insert into <select id="varTargetSelect" class="var-target-select"><option value="body">Body</option><option value="subject">Subject</option></select>:</span>
             </div>
 
             <!-- Personal PDFs: one PDF per recipient, matched by loan number -->
@@ -232,7 +241,6 @@
               <div id="attachmentList" class="attachment-list"></div>
             </div>
 
-
             <div class="compose-recipients-panel">
               <div class="compose-recipients-head">
                 <div>
@@ -251,14 +259,14 @@
                     <tr>
                       <th style="width:36px"></th>
                       <th style="width:40px">#</th>
-                      <th>Loan Number</th>
-                      <th>Email</th>
-                      <th>Branch</th>
+                      <th>Loan Number / Name</th>
+                      <th>Recipients (To)</th>
+                      <th>CC</th>
                       <th>Status</th>
                     </tr>
                   </thead>
                   <tbody id="composeRecipientsTbody">
-                    <tr><td colspan="5" class="empty">No contacts uploaded yet. Upload in Contacts tab.</td></tr>
+                    <tr><td colspan="6" class="empty">No contacts uploaded yet. Upload in Contacts tab.</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -302,7 +310,7 @@
                 <span>📅 Schedule send (send at a specific time)</span>
               </label>
               <div id="scheduleBox" class="hidden" style="margin-top:10px">
-                <label>Send Date & Time
+                <label>Send Date &amp; Time
                   <input type="datetime-local" id="scheduledAt" style="font-size:12px">
                 </label>
                 <p style="font-size:10px;color:var(--muted);margin-top:4px">Campaign will be queued and sent automatically at this time.</p>
@@ -311,16 +319,18 @@
 
             <div class="compose-actions">
               <button type="button" class="btn outline" id="checkSenderBtn" onclick="checkCurrentSender()">Check Connection</button>
+              <button type="button" class="btn outline" onclick="showEmailPreview()">👁 Preview Email</button>
               <button type="button" class="btn outline" onclick="sendTest()">Send test email</button>
-              <button type="button" class="btn primary big" id="sendCampaignBtn" onclick="sendCampaignDirect()">Send to selected recipients <span>→</span></button>
+              <button type="button" class="btn primary big" id="sendCampaignBtn" onclick="sendCampaignDirect()">Send to selected rows <span>→</span></button>
             </div>
             <div id="actionMessage" class="action-message"></div>
 
           </div>
 
           <div class="panel preview-panel">
-            <div class="preview-head"><span>LIVE PREVIEW</span><span class="sample-tag">Sample: Arun</span></div>
+            <div class="preview-head"><span>LIVE PREVIEW</span><span class="sample-tag" id="previewSampleTag">Sample: first row</span></div>
             <div class="email-preview">
+              <div class="preview-to-row" id="previewToRow"></div>
               <div class="preview-subject" id="previewSubject">Your subject</div>
               <div class="preview-line"></div>
               <div class="preview-body" id="previewBody">Your personalized message will appear here.</div>
@@ -353,6 +363,7 @@
           <div class="panel-head">
             <div><h3 id="progressTitle">Campaign details</h3><p id="progressMeta">Recipient-level results</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button id="downloadFailedBtn" class="btn outline small-btn failed-dl-btn hidden" onclick="downloadFailed(currentCampaignId)" title="Download failed recipients as Excel">⬇ Failed (.xlsx)</button>
               <button id="downloadSkippedBtn" class="btn outline small-btn skipped-dl-btn hidden" onclick="downloadSkipped(currentCampaignId)">⬇ Not Sent (.xlsx)</button>
               <button class="btn outline small-btn" onclick="downloadReport(currentCampaignId)">⬇ Full Report (.xlsx)</button>
               <button class="btn outline small-btn" onclick="closeCampaignDetails()">Close</button>
@@ -365,7 +376,7 @@
 
           <div class="table-wrap details-table">
             <table>
-              <thead><tr><th>#</th><th>Loan Number</th><th>Email</th><th>Status</th><th>Error / SMTP message</th><th>Time</th></tr></thead>
+              <thead><tr><th>#</th><th>Loan Number / Name</th><th>To Recipients</th><th>CC</th><th>Status</th><th>Error / Note</th><th>Time</th></tr></thead>
               <tbody id="recipientsTable"></tbody>
             </table>
           </div>
@@ -376,7 +387,6 @@
   </div>
 
   <!-- Microsoft Outlook Setup Modal -->
-  <!-- Email Sender Setup Modal — Simple OTP + Advanced OAuth tabs -->
   <div id="msModal" class="modal-overlay hidden" onclick="if(event.target===this)closeMsModal()">
     <div class="modal-card" style="max-width:460px">
 
@@ -408,7 +418,6 @@
           <input id="quickSmtpPass" type="password" placeholder="Paste your App Password here">
         </label>
 
-        <!-- How to get App Password -->
         <div id="appPwdGuide" class="app-pwd-guide">
           <b id="appPwdGuideTitle">How to get an Outlook App Password:</b>
           <ol id="appPwdGuideSteps">
@@ -431,7 +440,6 @@
       <!-- ── ADVANCED / OAUTH TAB ── -->
       <div id="setupOauth">
 
-        <!-- Warning if already has api:// in Client ID -->
         <div id="oauthWarning" class="hidden" style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:11px;color:#b91c1c">
           ⚠️ <b>Remove <code>api://</code> from Client ID.</b> Paste only the UUID part, e.g. <code>3f43945e-74c8-...</code>
         </div>
@@ -472,7 +480,7 @@
             <small style="font-size:9px;color:var(--muted)">Found in Azure → App registrations → your app → Overview. Do NOT include <code>api://</code></small>
           </label>
           <label>Client Secret (Value)
-            <input id="msClientSecret" type="password" placeholder="Paste the Value from Certificates & secrets">
+            <input id="msClientSecret" type="password" placeholder="Paste the Value from Certificates &amp; secrets">
           </label>
           <label>Tenant ID
             <input id="msTenantId" type="text" value="common" placeholder="common">
@@ -505,6 +513,93 @@
       <div class="modal-footer">
         <button type="button" class="btn outline" onclick="handleDuplicates('send')">✓ Send All</button>
         <button type="button" class="btn primary" style="background:linear-gradient(135deg,#f59e0b,#d97706);box-shadow:0 8px 18px rgba(245,158,11,.28)" onclick="handleDuplicates('deny')">⛔ Deny Duplicates → Move to Undeliverable</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Validation Summary Modal ══ -->
+  <div id="validationModal" class="modal-overlay hidden" onclick="if(event.target===this)closeValidationModal()">
+    <div class="modal-card" style="max-width:580px">
+      <div class="modal-head">
+        <div class="modal-head-left">
+          <div class="brand-mark" id="validationModalIcon" style="background:linear-gradient(135deg,#13a673,#0e7e5a)">✓</div>
+          <div>
+            <h3 id="validationModalTitle">Pre-Send Validation</h3>
+            <p id="validationModalSubtitle">Review before sending</p>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeValidationModal()">✕</button>
+      </div>
+
+      <div id="validationSummaryBanner" class="validation-summary-banner"></div>
+
+      <div id="validationIssuesList" class="validation-issues-list hidden">
+        <div class="validation-issues-header">Rows with issues:</div>
+        <div id="validationIssuesRows"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn outline" onclick="closeValidationModal()">Cancel</button>
+        <button type="button" class="btn primary" id="validationProceedBtn" onclick="proceedAfterValidation()">Proceed to Send →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Email Preview Modal ══ -->
+  <div id="previewModal" class="modal-overlay hidden" onclick="if(event.target===this)closePreviewModal()">
+    <div class="modal-card" style="max-width:620px">
+      <div class="modal-head">
+        <div class="modal-head-left">
+          <div class="brand-mark" style="background:linear-gradient(135deg,#635bff,#8178ff)">👁</div>
+          <div>
+            <h3>Email Preview</h3>
+            <p id="previewModalContact">Preview for first selected row</p>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closePreviewModal()">✕</button>
+      </div>
+
+      <div class="preview-modal-email">
+        <div class="preview-modal-row"><span class="preview-modal-label">To:</span> <span id="previewModalTo" class="preview-modal-value"></span></div>
+        <div class="preview-modal-row" id="previewModalCcRow"><span class="preview-modal-label">CC:</span> <span id="previewModalCc" class="preview-modal-value"></span></div>
+        <div class="preview-modal-row"><span class="preview-modal-label">Subject:</span> <span id="previewModalSubject" class="preview-modal-value preview-modal-subject"></span></div>
+        <div class="preview-modal-divider"></div>
+        <div id="previewModalBody" class="preview-modal-body"></div>
+      </div>
+
+      <div id="previewModalWarnings" class="preview-modal-warnings hidden"></div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn outline" onclick="closePreviewModal()">Close</button>
+        <button type="button" class="btn primary" onclick="closePreviewModal();sendCampaignDirect()">Send Campaign →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Send Confirmation Modal ══ -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width:460px">
+      <div class="modal-head">
+        <div class="modal-head-left">
+          <div class="brand-mark" style="background:linear-gradient(135deg,#f59e0b,#d97706)">⚠</div>
+          <div>
+            <h3>Confirm Send Campaign</h3>
+            <p>You are about to send a bulk email campaign.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="confirm-stats">
+        <div class="confirm-stat"><span id="confirmRows">0</span><small>Rows (Emails)</small></div>
+        <div class="confirm-stat"><span id="confirmValid">0</span><small>Valid</small></div>
+        <div class="confirm-stat"><span id="confirmInvalid">0</span><small>Will Skip</small></div>
+        <div class="confirm-stat"><span id="confirmRecipients">0</span><small>Est. Recipients</small></div>
+      </div>
+      <p id="confirmWarning" class="confirm-warning hidden"></p>
+
+      <div class="modal-footer">
+        <button type="button" class="btn outline" onclick="closeConfirmModal()">Cancel</button>
+        <button type="button" class="btn primary" id="confirmSendBtn" onclick="executeSend()">Send Campaign →</button>
       </div>
     </div>
   </div>
@@ -547,7 +642,7 @@
 
         <div style="display:flex;gap:10px;margin-top:18px">
           <button type="button" class="btn outline" style="flex:1" onclick="smtpOtpBack()">← Back</button>
-          <button type="button" class="btn primary" style="flex:2" onclick="smtpConfirmOtp()">✓ Verify & Switch</button>
+          <button type="button" class="btn primary" style="flex:2" onclick="smtpConfirmOtp()">✓ Verify &amp; Switch</button>
         </div>
         <p style="text-align:center;font-size:10px;color:var(--muted);margin-top:12px">
           No code? <a href="#" onclick="smtpOtpBack();return false" style="color:var(--primary)">Resend</a>
