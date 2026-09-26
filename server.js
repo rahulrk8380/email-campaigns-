@@ -319,11 +319,22 @@ function deleteSetting(key) {
 }
 
 // Microsoft OAuth & Graph API helpers
-function getMicrosoftConfig() {
+function getMicrosoftConfig(req) {
   const clientId = process.env.MICROSOFT_CLIENT_ID || getSetting("ms_client_id") || "";
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || getSetting("ms_client_secret") || "";
   const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "common";
-  const redirectUri = process.env.MICROSOFT_REDIRECT_URI || getSetting("ms_redirect_uri") || `http://localhost:${PORT}/auth/microsoft/callback`;
+
+  // Auto-build redirect URI from the ACTUAL request host (works on both localhost and Render)
+  // Falls back to env var if request object is not available
+  let redirectUri;
+  if (req) {
+    const proto = req.protocol || (req.secure ? "https" : "http");
+    const host = req.get("host") || "localhost:3000";
+    redirectUri = `${proto}://${host}/auth/microsoft/callback`;
+  } else {
+    redirectUri = process.env.MICROSOFT_REDIRECT_URI || getSetting("ms_redirect_uri") || `http://localhost:${PORT}/auth/microsoft/callback`;
+  }
+
   return {
     clientId: String(clientId || "").trim(),
     clientSecret: String(clientSecret || "").trim(),
@@ -541,7 +552,7 @@ let sendLock = false;
 
 // Microsoft OAuth Endpoints
 app.get("/auth/microsoft/login", (req, res) => {
-  const config = getMicrosoftConfig();
+  const config = getMicrosoftConfig(req);
   if (!config.clientId) {
     return res.redirect("/?error=microsoft_client_id_missing");
   }
@@ -576,7 +587,7 @@ app.get("/auth/microsoft/callback", async (req, res) => {
     return res.redirect("/?error=no_authorization_code_received");
   }
 
-  const config = getMicrosoftConfig();
+  const config = getMicrosoftConfig(req);
   if (!config.clientId) {
     return res.redirect("/?error=microsoft_client_id_missing");
   }
@@ -633,7 +644,7 @@ app.get("/auth/microsoft/callback", async (req, res) => {
 });
 
 app.get("/api/microsoft/status", (req, res) => {
-  const config = getMicrosoftConfig();
+  const config = getMicrosoftConfig(req);
   const raw = getSetting("ms_tokens");
   let connected = false;
   let email = getSetting("ms_account_email") || null;
