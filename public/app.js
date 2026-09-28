@@ -26,6 +26,54 @@ async function api(url, options = {}) {
   return data;
 }
 
+// ── Global Dialog — replaces browser confirm() / alert() ─────────────────────
+function showDialog({ icon = "⚠️", title = "Confirm", message = "", okText = "OK", cancelText = null, danger = false } = {}) {
+  return new Promise(resolve => {
+    const dlg      = $("globalDialog");
+    const titleEl  = $("globalDialogTitle");
+    const msgEl    = $("globalDialogMsg");
+    const iconEl   = $("globalDialogIcon");
+    const okBtn    = $("globalDialogOk");
+    const cancelBtn= $("globalDialogCancel");
+
+    iconEl.textContent  = icon;
+    titleEl.textContent = title;
+    msgEl.textContent   = message;
+    okBtn.textContent   = okText;
+    okBtn.className     = `btn ${danger ? "danger" : "primary"}`;
+
+    if (cancelText) {
+      cancelBtn.textContent = cancelText;
+      cancelBtn.style.display = "";
+    } else {
+      cancelBtn.style.display = "none";
+    }
+
+    dlg.classList.remove("hidden");
+
+    const cleanup = (result) => {
+      dlg.classList.add("hidden");
+      okBtn.onclick     = null;
+      cancelBtn.onclick = null;
+      resolve(result);
+    };
+
+    okBtn.onclick     = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+  });
+}
+
+// Shorthand: confirmation dialog (returns true/false)
+function showConfirm(message, { title = "Confirm", icon = "⚠️", okText = "Yes", cancelText = "Cancel", danger = false } = {}) {
+  return showDialog({ icon, title, message, okText, cancelText, danger });
+}
+
+// Shorthand: info/alert dialog (returns true when dismissed)
+function showAlert(message, { title = "Info", icon = "ℹ️", okText = "OK" } = {}) {
+  return showDialog({ icon, title, message, okText, cancelText: null });
+}
+
+
 function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, m => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
@@ -109,8 +157,10 @@ $("loginForm").addEventListener("submit", async e => {
 });
 
 $("logoutBtn").onclick = async () => {
-  await api("/api/logout", { method: "POST" });
-  showLogin();
+  const ok = await showConfirm("Are you sure you want to logout?", { title: "Logout", icon: "👋", okText: "Logout", cancelText: "Stay" });
+  if (!ok) return;
+  try { await api("/api/logout", { method: "POST" }); } catch {}
+  window.location.reload();
 };
 
 document.querySelectorAll(".nav").forEach(b => {
@@ -388,7 +438,8 @@ async function uploadExcel(file) {
 }
 
 async function clearContacts() {
-  if (!confirm("Clear the current contact list?")) return;
+  const ok = await showConfirm("Clear the current contact list? This cannot be undone.", { title: "Clear Contacts", icon: "🗑️", okText: "Clear", danger: true });
+  if (!ok) return;
   await api("/api/contacts", { method: "DELETE" });
   contacts = [];
   selectedContactIds.clear();
@@ -668,38 +719,40 @@ if (pdfFolderDropzone) {
 }
 
 // ── Send Timer ────────────────────────────────────────────────────────────────
-let delayUnit = "sec";
+let sendMode = "delay"; // "immediate" | "delay"
 
-function setDelayUnit(unit) {
-  delayUnit = unit;
-  $("unitSec").classList.toggle("active", unit === "sec");
-  $("unitMin").classList.toggle("active", unit === "min");
-  updateDelayPreview();
+function setSendMode(mode) {
+  sendMode = mode;
+  const modeImmediate = $("modeImmediate");
+  const modeDelay     = $("modeDelay");
+  const delayControls = $("delayControls");
+  const delayPreview  = $("delayPreview");
+
+  if (modeImmediate) modeImmediate.classList.toggle("active", mode === "immediate");
+  if (modeDelay)     modeDelay.classList.toggle("active",     mode === "delay");
+  if (delayControls) delayControls.style.display = mode === "delay" ? "" : "none";
+  if (delayPreview)  delayPreview.style.display  = mode === "delay" ? "" : "none";
 }
-window.setDelayUnit = setDelayUnit;
+window.setSendMode = setSendMode;
 
 function getDelaySeconds() {
-  const val = Number($("delayInput")?.value || 5);
-  return delayUnit === "min" ? val * 60 : val;
+  if (sendMode === "immediate") return 0;
+  return Math.max(1, Number($("delayInput")?.value || 5));
 }
 
 function updateDelayPreview() {
-  const val = Number($("delayInput")?.value || 5);
-  const secs = delayUnit === "min" ? val * 60 : val;
-  const label = delayUnit === "min"
-    ? `${val} minute${val === 1 ? "" : "s"} (${secs} seconds)`
-    : `${secs} second${secs === 1 ? "" : "s"}`;
-  const el = $("delayPreview");
-  if (el) el.textContent = `Each email will be sent ${label} apart`;
+  const val  = Number($("delayInput")?.value || 5);
+  const el   = $("delayPreview");
+  if (el) el.textContent = `Each email will be sent ${val} second${val === 1 ? "" : "s"} apart`;
   const slider = $("delaySlider");
-  if (slider) slider.value = Math.min(300, secs);
+  if (slider) slider.value = Math.min(300, val);
 }
 
 const delaySlider = $("delaySlider");
-const delayInput = $("delayInput");
+const delayInput  = $("delayInput");
 if (delaySlider && delayInput) {
   delaySlider.addEventListener("input", () => { delayInput.value = delaySlider.value; updateDelayPreview(); });
-  delayInput.addEventListener("input", () => { delaySlider.value = Math.min(300, Number(delayInput.value) || 1); updateDelayPreview(); });
+  delayInput.addEventListener("input",  () => { delaySlider.value = Math.min(300, Number(delayInput.value) || 1); updateDelayPreview(); });
 }
 
 // ── Live Preview ──────────────────────────────────────────────────────────────
@@ -1070,7 +1123,11 @@ async function doSendCampaign(ids, senderType, senderLabel, validResult) {
 
   // Warn if PDF folder active
   if (currentPdfFolderId) {
-    if (!confirm(`Send campaign to ${validResult.valid} rows via ${senderLabel}?\n\n📂 Personal PDFs are active (${pdfFolderFileNames.length} PDFs). Rows without a matching PDF will be SKIPPED.\n\nProceed?`)) return;
+    const ok = await showConfirm(
+      `📂 Personal PDFs are active (${pdfFolderFileNames.length} PDFs).\n\nRows without a matching PDF will be SKIPPED.\n\nSend campaign to ${validResult.valid} rows via ${senderLabel}?`,
+      { title: "Send with Personal PDFs", icon: "📂", okText: "Send", cancelText: "Cancel" }
+    );
+    if (!ok) return;
   }
 
   try {
@@ -1185,22 +1242,44 @@ async function proceedToSend(campaignId, senderLabel) {
 // ── Schedule Helpers ──────────────────────────────────────────────────────────
 
 function toggleSchedule() {
-  const on = $("scheduleToggle") && $("scheduleToggle").checked;
+  const on  = $("scheduleToggle") && $("scheduleToggle").checked;
   const box = $("scheduleBox");
   if (box) box.classList.toggle("hidden", !on);
-  if (on && $("scheduledAt")) {
-    const d = new Date(Date.now() + 60 * 60 * 1000);
+
+  if (on) {
+    // Pre-fill with 1 hour from now
+    const d   = new Date(Date.now() + 60 * 60 * 1000);
     const pad = n => String(n).padStart(2, "0");
-    $("scheduledAt").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if ($("scheduledDate")) $("scheduledDate").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    if ($("scheduledTime")) $("scheduledTime").value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    updateSchedulePreview();
+
+    // Live update preview when user changes date/time
+    $("scheduledDate")?.addEventListener("change", updateSchedulePreview);
+    $("scheduledTime")?.addEventListener("change", updateSchedulePreview);
   }
 }
 window.toggleSchedule = toggleSchedule;
 
+function updateSchedulePreview() {
+  const dateVal = $("scheduledDate")?.value;
+  const timeVal = $("scheduledTime")?.value;
+  const el      = $("schedulePreviewText");
+  if (!el) return;
+  if (dateVal && timeVal) {
+    const dt = new Date(`${dateVal}T${timeVal}`);
+    el.textContent = `📅 Will send on ${dt.toLocaleDateString("en-IN", { weekday:"long", year:"numeric", month:"long", day:"numeric" })} at ${dt.toLocaleTimeString("en-IN", { hour:"2-digit", minute:"2-digit" })}`;
+  } else {
+    el.textContent = "Select a date and time above";
+  }
+}
+
 function getScheduledAt() {
   if (!$("scheduleToggle") || !$("scheduleToggle").checked) return null;
-  const val = $("scheduledAt") && $("scheduledAt").value;
-  if (!val) return null;
-  return new Date(val).toISOString();
+  const dateVal = $("scheduledDate")?.value;
+  const timeVal = $("scheduledTime")?.value;
+  if (!dateVal || !timeVal) return null;
+  return new Date(`${dateVal}T${timeVal}`).toISOString();
 }
 
 async function removeAttachment(id) {
@@ -1506,7 +1585,8 @@ window.saveTemplate = saveTemplate;
 async function deleteTemplate(id) {
   const t = savedTemplates.find(x => x.id === id);
   if (!t) return;
-  if (!confirm(`Delete template "${t.name}"?`)) return;
+  const ok = await showConfirm(`Delete template "${t.name}"? This cannot be undone.`, { title: "Delete Template", icon: "🗑️", okText: "Delete", danger: true });
+  if (!ok) return;
   try {
     await api(`/api/templates/${id}`, { method: "DELETE" });
     await loadTemplates();
@@ -1733,8 +1813,9 @@ async function saveMsConfig(e) {
   }
 }
 
-function disconnectMicrosoft() {
-  if (!confirm("Disconnect the Microsoft Outlook account?")) return;
+async function disconnectMicrosoft() {
+  const ok = await showConfirm("Disconnect the Microsoft Outlook account?", { title: "Disconnect Outlook", icon: "🔌", okText: "Disconnect", danger: true });
+  if (!ok) return;
   api("/api/microsoft/disconnect", { method: "POST" })
     .then(() => { toast("Microsoft account disconnected.", "success"); closeMsModal(); loadMicrosoftStatus(); })
     .catch(e => toast(e.message, "error"));

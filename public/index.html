@@ -286,36 +286,69 @@
               <div id="templateList" class="template-list"></div>
             </div>
 
-            <!-- Send Timer — mandatory delay between emails -->
+            <!-- Send Timer -->
             <div class="timer-panel">
               <div class="timer-head">
                 <span>⏱ <strong>Delay between emails</strong> <span class="badge-required">Required</span></span>
                 <span class="timer-hint">Prevents spam filters — minimum 1 second</span>
               </div>
-              <div class="timer-controls">
+              <!-- Send mode cards -->
+              <div class="send-mode-row">
+                <div class="send-mode-option" id="modeImmediate" onclick="setSendMode('immediate')">
+                  <div class="send-mode-icon">⚡</div>
+                  <div>
+                    <div class="send-mode-label">Send immediately</div>
+                    <div class="send-mode-sub">No delay between emails</div>
+                  </div>
+                </div>
+                <div class="send-mode-option active" id="modeDelay" onclick="setSendMode('delay')">
+                  <div class="send-mode-icon">⏱</div>
+                  <div>
+                    <div class="send-mode-label">With delay</div>
+                    <div class="send-mode-sub">Safer for large sends</div>
+                  </div>
+                </div>
+              </div>
+              <div id="delayControls" class="delay-controls-wrap">
                 <input type="range" id="delaySlider" min="1" max="300" value="5" class="delay-slider">
-                <input type="number" id="delayInput" min="1" max="9999" value="5" class="delay-number-input">
-                <div class="unit-toggle">
-                  <button type="button" id="unitSec" class="unit-btn active" onclick="setDelayUnit('sec')">sec</button>
-                  <button type="button" id="unitMin" class="unit-btn" onclick="setDelayUnit('min')">min</button>
+                <div class="delay-number-wrap">
+                  <input type="number" id="delayInput" min="1" max="9999" value="5" class="delay-number-input">
+                  <span class="delay-unit-label">sec</span>
                 </div>
               </div>
               <div id="delayPreview" class="delay-preview">Each email will be sent 5 seconds apart</div>
             </div>
 
-            <!-- Schedule Send -->
-            <div class="schedule-section">
-              <label class="schedule-toggle-label">
-                <input type="checkbox" id="scheduleToggle" onchange="toggleSchedule()"> 
-                <span>📅 Schedule send (send at a specific time)</span>
-              </label>
-              <div id="scheduleBox" class="hidden" style="margin-top:10px">
-                <label>Send Date &amp; Time
-                  <input type="datetime-local" id="scheduledAt" style="font-size:12px">
+            <!-- Schedule Send — premium toggle -->
+            <div class="schedule-section-premium">
+              <div class="schedule-header-row">
+                <div class="schedule-header-left">
+                  <span class="schedule-icon">📅</span>
+                  <div>
+                    <div class="schedule-title">Schedule Send</div>
+                    <div class="schedule-subtitle">Send at a specific date &amp; time</div>
+                  </div>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="scheduleToggle" onchange="toggleSchedule()">
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 </label>
-                <p style="font-size:10px;color:var(--muted);margin-top:4px">Campaign will be queued and sent automatically at this time.</p>
+              </div>
+              <div id="scheduleBox" class="schedule-datetime-box hidden">
+                <div class="schedule-datetime-row">
+                  <div class="schedule-dt-group">
+                    <label class="schedule-dt-label">📅 Date</label>
+                    <input type="date" id="scheduledDate" class="schedule-dt-input">
+                  </div>
+                  <div class="schedule-dt-group">
+                    <label class="schedule-dt-label">🕐 Time</label>
+                    <input type="time" id="scheduledTime" class="schedule-dt-input">
+                  </div>
+                </div>
+                <div id="schedulePreviewText" class="schedule-preview-text"></div>
               </div>
             </div>
+
 
             <div class="compose-actions">
               <button type="button" class="btn outline" id="checkSenderBtn" onclick="checkCurrentSender()">Check Connection</button>
@@ -649,6 +682,19 @@
         </p>
       </div>
 
+    </div>
+  </div>
+
+  <!-- ══ Global Confirm Dialog (replaces browser alert/confirm) ══ -->
+  <div id="globalDialog" class="modal-overlay hidden" style="z-index:9999">
+    <div class="global-dialog-card">
+      <div class="global-dialog-icon" id="globalDialogIcon">⚠️</div>
+      <div class="global-dialog-title" id="globalDialogTitle">Confirm</div>
+      <div class="global-dialog-msg" id="globalDialogMsg"></div>
+      <div class="global-dialog-actions">
+        <button type="button" class="btn outline" id="globalDialogCancel">Cancel</button>
+        <button type="button" class="btn primary" id="globalDialogOk">OK</button>
+      </div>
     </div>
   </div>
 

@@ -278,3 +278,47 @@
 .green{color:var(--green)!important;font-weight:850}
 .red{color:var(--red)!important;font-weight:850}
 
+
+/* ── Send Mode Cards (Immediate / Delay) ─────────────────────────────── */
+.send-mode-row{display:flex;gap:10px;margin:12px 0 8px}
+.send-mode-option{display:flex;align-items:center;gap:10px;flex:1;border:2px solid var(--line);border-radius:12px;padding:11px 14px;cursor:pointer;transition:.18s;background:#fff;user-select:none}
+.send-mode-option:hover{border-color:#a5b4fc;background:#f5f3ff}
+.send-mode-option.active{border-color:var(--primary);background:#f0edff;box-shadow:0 0 0 3px rgba(91,75,233,.1)}
+.send-mode-icon{font-size:20px;flex-shrink:0}
+.send-mode-label{font-size:12px;font-weight:800;color:var(--ink)}
+.send-mode-sub{font-size:10px;color:var(--muted);margin-top:1px}
+.delay-controls-wrap{display:flex;align-items:center;gap:10px;margin-top:4px}
+.delay-number-wrap{display:flex;align-items:center;gap:6px;background:#f7f7fb;border:1.5px solid var(--line);border-radius:10px;padding:4px 10px}
+.delay-number-input{width:56px;border:none;background:transparent;font-size:15px;font-weight:800;color:var(--ink);text-align:center;outline:none}
+.delay-unit-label{font-size:12px;font-weight:700;color:var(--muted)}
+
+/* ── Premium Schedule Toggle ─────────────────────────────────────────── */
+.schedule-section-premium{background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:16px 18px;margin-top:12px}
+.schedule-header-row{display:flex;align-items:center;justify-content:space-between}
+.schedule-header-left{display:flex;align-items:center;gap:12px}
+.schedule-icon{font-size:22px}
+.schedule-title{font-size:13px;font-weight:800;color:var(--ink)}
+.schedule-subtitle{font-size:10px;color:var(--muted);margin-top:1px}
+.toggle-switch{position:relative;display:inline-block;width:48px;height:26px;cursor:pointer;flex-shrink:0}
+.toggle-switch input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{position:absolute;inset:0;background:#d1d5db;border-radius:999px;transition:.25s}
+.toggle-thumb{position:absolute;left:3px;top:3px;width:20px;height:20px;background:#fff;border-radius:50%;transition:.25s;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.toggle-switch input:checked + .toggle-track{background:var(--primary)}
+.toggle-switch input:checked + .toggle-track .toggle-thumb{transform:translateX(22px)}
+.schedule-datetime-box{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
+.schedule-datetime-row{display:flex;gap:12px}
+.schedule-dt-group{flex:1;display:flex;flex-direction:column;gap:5px}
+.schedule-dt-label{font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.schedule-dt-input{border:1.5px solid var(--line);border-radius:10px;padding:9px 12px;font-size:13px;font-weight:700;color:var(--ink);outline:none;transition:.15s;background:#fafafa;width:100%;box-sizing:border-box}
+.schedule-dt-input:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgba(91,75,233,.08)}
+.schedule-preview-text{margin-top:10px;font-size:11px;font-weight:700;color:var(--primary);background:#f0edff;border-radius:8px;padding:8px 12px;min-height:18px}
+
+/* ── Global Confirm Dialog ───────────────────────────────────────────── */
+.global-dialog-card{background:#fff;border-radius:20px;padding:32px 28px;max-width:380px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.18);animation:slideUp .2s ease}
+.global-dialog-icon{font-size:36px;margin-bottom:10px}
+.global-dialog-title{font-size:16px;font-weight:900;color:var(--ink);margin-bottom:8px}
+.global-dialog-msg{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:22px;white-space:pre-line}
+.global-dialog-actions{display:flex;gap:10px;justify-content:center}
+.global-dialog-actions .btn{min-width:100px;border-radius:10px}
+.btn.danger{background:#ef4444;color:#fff;border:none}
+.btn.danger:hover{background:#dc2626}
