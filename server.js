@@ -410,6 +410,10 @@ async function getValidMicrosoftAccessToken() {
 async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, attachments = [] }) {
   const accessToken = await getValidMicrosoftAccessToken();
 
+  // Get sender's email from stored token (used for Reply-To and From display)
+  const senderEmail = getSetting("ms_account_email") || "";
+  const senderName  = getSetting("ms_account_name")  || getSetting("smtp_from_name") || "SmartMail";
+
   const graphAttachments = [];
   for (const att of attachments) {
     const filePath = att.file_path || att.path;
@@ -426,7 +430,7 @@ async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, atta
 
   const isHtml = /<[a-z][\s\S]*>/i.test(body);
 
-  // Build To recipients — support array (new multi-email) or legacy single string
+  // Build To recipients — support array (multi-email) or legacy single string
   const toList = Array.isArray(toEmails) && toEmails.length
     ? toEmails
     : (to ? String(to).split(",").map(s => s.trim()).filter(Boolean) : []);
@@ -452,7 +456,28 @@ async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, atta
       },
       toRecipients,
       ccRecipients,
-      attachments: graphAttachments
+      attachments: graphAttachments,
+
+      // ── Reply-To: ensures recipient replies land in YOUR inbox ──────────────
+      // Without this, Microsoft Graph may use internal routing and replies get lost.
+      replyTo: senderEmail
+        ? [{ emailAddress: { address: senderEmail, name: senderName } }]
+        : [],
+
+      // ── From display name ──────────────────────────────────────────────────
+      // Shows "SmartMail <temak.technology@outlook.com>" instead of raw email
+      from: senderEmail
+        ? { emailAddress: { address: senderEmail, name: senderName } }
+        : undefined,
+
+      // ── Internet message headers for proper email routing ──────────────────
+      internetMessageHeaders: [
+        { name: "X-Mailer",         value: "SmartMail-Pro" },
+        { name: "X-Priority",       value: "3" },
+        { name: "Importance",       value: "Normal" },
+        // Reply-To as internet header (belt-and-suspenders approach)
+        ...(senderEmail ? [{ name: "Reply-To", value: `${senderName} <${senderEmail}>` }] : [])
+      ]
     },
     saveToSentItems: true
   };
