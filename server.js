@@ -470,13 +470,11 @@ async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, atta
         ? { emailAddress: { address: senderEmail, name: senderName } }
         : undefined,
 
-      // ── Internet message headers for proper email routing ──────────────────
+      // ── Internet message headers — Graph API ONLY allows X- custom headers here ──
+      // Standard headers (Importance, Reply-To etc.) must use dedicated fields above
       internetMessageHeaders: [
-        { name: "X-Mailer",         value: "SmartMail-Pro" },
-        { name: "X-Priority",       value: "3" },
-        { name: "Importance",       value: "Normal" },
-        // Reply-To as internet header (belt-and-suspenders approach)
-        ...(senderEmail ? [{ name: "Reply-To", value: `${senderName} <${senderEmail}>` }] : [])
+        { name: "X-Mailer",   value: "SmartMail-Pro" },
+        { name: "X-Priority", value: "3"              }
       ]
     },
     saveToSentItems: true
