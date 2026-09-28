@@ -1670,8 +1670,52 @@ async function quickSmtpSendOtp() {
 }
 window.quickSmtpSendOtp = quickSmtpSendOtp;
 
-function saveMsConfig(e) { if (e) e.preventDefault(); }
-function disconnectMicrosoft() {}
+async function saveMsConfig(e) {
+  if (e) e.preventDefault();
+
+  const clientId     = ($("msClientId")?.value     || "").trim();
+  const clientSecret = ($("msClientSecret")?.value  || "").trim();
+  const tenantId     = ($("msTenantId")?.value      || "common").trim();
+
+  if (!clientId) {
+    return toast("Please enter your Application (Client) ID.", "error");
+  }
+
+  // Warn if user pasted api:// prefix
+  if (clientId.startsWith("api://") || clientId.startsWith("https://")) {
+    return toast("Remove api:// from the Client ID — paste only the UUID part.", "error");
+  }
+
+  const btn = $("msSubmitBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving & redirecting…"; }
+
+  try {
+    // Save config to DB
+    await api("/api/microsoft/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId, clientSecret, tenantId })
+    });
+
+    toast("Config saved — redirecting to Microsoft login…", "success");
+
+    // Redirect to OAuth flow (server will build the correct redirect URI)
+    setTimeout(() => {
+      window.location.href = "/auth/microsoft/login";
+    }, 500);
+  } catch (err) {
+    toast("Error saving config: " + err.message, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "Sign in with Microsoft ⊞"; }
+  }
+}
+
+function disconnectMicrosoft() {
+  if (!confirm("Disconnect the Microsoft Outlook account?")) return;
+  api("/api/microsoft/disconnect", { method: "POST" })
+    .then(() => { toast("Microsoft account disconnected.", "success"); closeMsModal(); loadMicrosoftStatus(); })
+    .catch(e => toast(e.message, "error"));
+}
+
 function copyRedirectUri() {
   const txt = $("redirectUriDisplay") ? $("redirectUriDisplay").textContent : "";
   if (!txt || txt === "loading...") return;
