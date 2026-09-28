@@ -165,10 +165,13 @@ function getContactEmails(c) {
   return emailArr;
 }
 
+// Returns array of CC email addresses (from CC1-CC10 or legacy CC column)
 function getContactCC(c) {
   let extras = {};
   try { extras = JSON.parse(c.extra_json || "{}"); } catch {}
-  return String(extras["__cc"] || "");
+  const raw = String(extras["__cc"] || "");
+  if (!raw) return [];
+  return raw.split(";").map(s => s.trim()).filter(Boolean);
 }
 
 function getContactInvalid(c) {
@@ -182,20 +185,24 @@ function renderContacts() {
   $("contactsTable").innerHTML = contacts.map((c, i) => {
     const isChecked = selectedContactIds.has(c.id);
     const emails = getContactEmails(c);
-    const cc = getContactCC(c);
+    const ccArr  = getContactCC(c);
     const invalid = getContactInvalid(c);
 
     const primaryEmail = emails[0] || "—";
-    const extraCount = emails.length - 1;
-    const extraBadge = extraCount > 0
+    const extraCount   = emails.length - 1;
+    const extraBadge   = extraCount > 0
       ? `<span class="email-more-badge">+${extraCount} more</span>` : "";
 
-    const statusCls = invalid ? "invalid-row-status" : "ready";
+    const statusCls   = invalid ? "invalid-row-status" : "ready";
     const statusLabel = invalid ? "⚠ No Email" : "Ready";
 
-    const ccDisplay = cc
-      ? cc.split(";").filter(Boolean).join(", ")
-      : "—";
+    // CC display: first CC + "+N more" badge
+    let ccDisplay = "—";
+    if (ccArr.length > 0) {
+      const ccExtra = ccArr.length - 1;
+      const ccBadge = ccExtra > 0 ? `<span class="email-more-badge">+${ccExtra} more</span>` : "";
+      ccDisplay = esc(ccArr[0]) + ccBadge;
+    }
 
     return `
       <tr class="${invalid ? "row-invalid" : ""}">
@@ -204,7 +211,7 @@ function renderContacts() {
         <td><b>${esc(c.name)}</b></td>
         <td>${esc(primaryEmail)}${extraBadge}</td>
         <td>${extraCount > 0 ? emails.slice(1).map(esc).join("<br>") : "—"}</td>
-        <td>${esc(ccDisplay)}</td>
+        <td>${ccDisplay}</td>
         <td><span class="status ${statusCls}">${statusLabel}</span>${invalid ? `<div class="invalid-reason">${esc(invalid)}</div>` : ""}</td>
       </tr>
     `;
@@ -243,16 +250,23 @@ function renderComposeRecipients() {
 
   tbody.innerHTML = list.map((c, i) => {
     const isChecked = selectedContactIds.has(c.id);
-    const emails = getContactEmails(c);
-    const cc = getContactCC(c);
-    const invalid = getContactInvalid(c);
+    const emails    = getContactEmails(c);
+    const ccArr     = getContactCC(c);
+    const invalid   = getContactInvalid(c);
 
     const primaryEmail = emails[0] || "—";
-    const extraCount = emails.length - 1;
-    const extraBadge = extraCount > 0 ? `<span class="email-more-badge">+${extraCount}</span>` : "";
-    const ccDisplay = cc ? cc.split(";").filter(Boolean).slice(0, 1).join(", ") + (cc.split(";").filter(Boolean).length > 1 ? "..." : "") : "—";
+    const extraCount   = emails.length - 1;
+    const extraBadge   = extraCount > 0 ? `<span class="email-more-badge">+${extraCount}</span>` : "";
 
-    const statusCls = invalid ? "draft" : isChecked ? "ready" : "draft";
+    // CC: show first + "+N more"
+    let ccDisplay = "—";
+    if (ccArr.length > 0) {
+      const ccExtra = ccArr.length - 1;
+      const ccBadge = ccExtra > 0 ? `<span class="email-more-badge">+${ccExtra}</span>` : "";
+      ccDisplay = esc(ccArr[0]) + ccBadge;
+    }
+
+    const statusCls   = invalid ? "draft" : isChecked ? "ready" : "draft";
     const statusLabel = invalid ? "Invalid" : isChecked ? "Ready" : "Excluded";
 
     return `
@@ -261,7 +275,7 @@ function renderComposeRecipients() {
         <td>${i + 1}</td>
         <td><b>${esc(c.name)}</b></td>
         <td>${esc(primaryEmail)}${extraBadge}</td>
-        <td>${esc(ccDisplay)}</td>
+        <td>${ccDisplay}</td>
         <td><span class="status ${statusCls}">${statusLabel}</span></td>
       </tr>
     `;

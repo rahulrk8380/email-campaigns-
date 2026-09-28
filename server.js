@@ -936,11 +936,21 @@ app.post("/api/upload", auth, spreadsheetUpload.single("file"), (req, res) => {
         // Filter to valid emails
         const validEmails = emailCols.filter(validEmail);
 
-        // ── CC column ──
-        const ccRaw = String(pick(row, ["cc","carbon copy","carboncopy"]) || "").trim();
-        const ccEmails = ccRaw
-          ? ccRaw.split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s))
-          : [];
+        // ── CC columns: CC1..CC10 (same pattern as Email1..Email9) ──
+        const ccCols = [];
+        for (let i = 1; i <= 10; i++) {
+          const val = cleanEmail(pick(row, [`cc${i}`, `cc ${i}`, `c-c${i}`]));
+          if (val) ccCols.push(val);
+        }
+        // Fallback: plain "CC" column — supports semicolon/comma-separated multiple emails
+        if (!ccCols.length) {
+          const ccRaw = String(pick(row, ["cc", "carbon copy", "carboncopy"]) || "").trim();
+          if (ccRaw) {
+            ccRaw.split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s))
+                 .forEach(e => ccCols.push(e));
+          }
+        }
+        const ccEmails = ccCols.filter(e => validEmail(e));
 
         // ── Other standard fields ──
         const number = String(pick(row, ["number","phone","mobile","phone number","mobile number"]) || "").trim();
