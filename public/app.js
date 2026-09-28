@@ -994,6 +994,13 @@ window.executeSend = executeSend;
 // ── Send Campaign Flow ────────────────────────────────────────────────────────
 
 function openMsModal() {
+  // If already configured via env vars and not yet connected, go straight to Microsoft login
+  if (msStatus.clientIdConfigured && !msStatus.connected) {
+    toast("Redirecting to Microsoft login…", "success");
+    setTimeout(() => { window.location.href = "/auth/microsoft/login"; }, 400);
+    return;
+  }
+
   $("msModal").classList.remove("hidden");
   $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
   const base = window.location.origin;
@@ -1673,9 +1680,16 @@ window.quickSmtpSendOtp = quickSmtpSendOtp;
 async function saveMsConfig(e) {
   if (e) e.preventDefault();
 
-  const clientId     = ($("msClientId")?.value     || "").trim();
+  let clientId     = ($("msClientId")?.value     || "").trim();
   const clientSecret = ($("msClientSecret")?.value  || "").trim();
   const tenantId     = ($("msTenantId")?.value      || "common").trim();
+
+  // If input is empty but server already has client ID configured (via env vars), go straight to login
+  if (!clientId && msStatus.clientIdConfigured) {
+    toast("Redirecting to Microsoft login…", "success");
+    setTimeout(() => { window.location.href = "/auth/microsoft/login"; }, 400);
+    return;
+  }
 
   if (!clientId) {
     return toast("Please enter your Application (Client) ID.", "error");
@@ -1690,7 +1704,7 @@ async function saveMsConfig(e) {
   if (btn) { btn.disabled = true; btn.textContent = "Saving & redirecting…"; }
 
   try {
-    // Save config to DB
+    // Save config to DB (only if user actually typed something)
     await api("/api/microsoft/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1698,11 +1712,7 @@ async function saveMsConfig(e) {
     });
 
     toast("Config saved — redirecting to Microsoft login…", "success");
-
-    // Redirect to OAuth flow (server will build the correct redirect URI)
-    setTimeout(() => {
-      window.location.href = "/auth/microsoft/login";
-    }, 500);
+    setTimeout(() => { window.location.href = "/auth/microsoft/login"; }, 500);
   } catch (err) {
     toast("Error saving config: " + err.message, "error");
     if (btn) { btn.disabled = false; btn.textContent = "Sign in with Microsoft ⊞"; }
