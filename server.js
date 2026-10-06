@@ -323,16 +323,12 @@ function getMicrosoftConfig(req) {
   const clientId     = process.env.MICROSOFT_CLIENT_ID     || getSetting("ms_client_id")     || "";
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || getSetting("ms_client_secret") || "";
 
-  // "consumers" = personal @outlook.com/@hotmail.com accounts (Azure app set to Personal accounts only)
-  // "common"    = both personal AND work accounts (Azure app set to All accounts)
-  // "organizations" = work/school accounts only
-  // Default to "consumers" because most SmartMail users use personal Outlook accounts.
-  // If MICROSOFT_TENANT_ID is set to "common" in env but app is Personal-only, auto-correct to "consumers".
-  let tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "consumers";
-  if (!tenantId || tenantId.trim() === "" || tenantId.trim() === "common") {
-    // "common" fails when Azure app is set to "Personal accounts only" — use "consumers" instead
-    tenantId = "consumers";
-  }
+  // Tenant ID controls which Microsoft accounts can sign in:
+  // "common"       = ALL Microsoft accounts — personal (@outlook.com) + ALL organizations worldwide ✅
+  // "consumers"    = personal @outlook.com/@hotmail.com ONLY
+  // "organizations"= work/school accounts ONLY
+  // Default: "common" — supports everyone (personal + any company using Microsoft 365)
+  const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "common";
 
   // Auto-build redirect URI from the ACTUAL request host (works on both localhost and Render)
   let redirectUri;
@@ -347,7 +343,7 @@ function getMicrosoftConfig(req) {
   return {
     clientId:     String(clientId     || "").trim(),
     clientSecret: String(clientSecret || "").trim(),
-    tenantId:     String(tenantId     || "consumers").trim(),
+    tenantId:     String(tenantId     || "common").trim(),
     redirectUri:  String(redirectUri  || "").trim()
   };
 }
