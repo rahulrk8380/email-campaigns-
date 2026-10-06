@@ -323,11 +323,11 @@ function getMicrosoftConfig(req) {
   const clientId     = process.env.MICROSOFT_CLIENT_ID     || getSetting("ms_client_id")     || "";
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || getSetting("ms_client_secret") || "";
 
-  // Tenant ID controls which Microsoft accounts can sign in:
-  // "consumers"    = personal @outlook.com/@hotmail.com (works WITHOUT Azure app changes) ✅
-  // "common"       = personal + ALL organizations (requires Azure app set to "All accounts")
-  // "organizations"= work/school accounts ONLY
-  const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "consumers";
+  // MULTI-TENANT: always use "common" so Microsoft auto-detects the user's org/tenant.
+  // "common" supports:  personal @outlook.com / @hotmail.com  AND  any Microsoft 365 org account
+  // "consumers" only works when Azure app = "Personal accounts only" (too restrictive)
+  // The Azure app is registered as "Any Entra ID Tenant + Personal Microsoft accounts"
+  const tenantId = "common";
 
   // Auto-build redirect URI from the ACTUAL request host (works on both localhost and Render)
   let redirectUri;
@@ -342,7 +342,7 @@ function getMicrosoftConfig(req) {
   return {
     clientId:     String(clientId     || "").trim(),
     clientSecret: String(clientSecret || "").trim(),
-    tenantId:     String(tenantId     || "common").trim(),
+    tenantId,
     redirectUri:  String(redirectUri  || "").trim()
   };
 }
@@ -603,11 +603,29 @@ app.get("/auth/microsoft/login", (req, res) => {
 });
 
 app.get("/auth/microsoft/callback", async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  const { code, state, error, error_description, error_subcode } = req.query;
 
   if (error) {
     console.error("Microsoft OAuth Callback Error:", error, error_description);
-    return res.redirect(`/?error=${encodeURIComponent(error_description || error)}`);
+
+    // Translate Microsoft error codes into user-friendly messages
+    let friendlyError;
+    if (error === "access_denied" && (error_subcode === "cancel" || (error_description || "").toLowerCase().includes("cancel"))) {
+      friendlyError = "Microsoft login was cancelled. Please try again.";
+    } else if (
+      error === "access_denied" ||
+      (error_description || "").toLowerCase().includes("admin") ||
+      (error_description || "").toLowerCase().includes("consent") ||
+      error === "unauthorized_client"
+    ) {
+      friendlyError = "admin_consent_required";
+    } else if (error === "invalid_client") {
+      friendlyError = "Microsoft authentication configuration error. Please contact the administrator.";
+    } else {
+      friendlyError = error_description || error;
+    }
+
+    return res.redirect(`/?error=${encodeURIComponent(friendlyError)}`);
   }
 
   if (!code) {
@@ -631,7 +649,8 @@ app.get("/auth/microsoft/callback", async (req, res) => {
       tokenParams.append("client_secret", config.clientSecret);
     }
 
-    const tokenRes = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`, {
+    // Use "common" for token exchange — supports personal + all org accounts
+    const tokenRes = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: tokenParams.toString()
@@ -651,9 +670,9 @@ app.get("/auth/microsoft/callback", async (req, res) => {
     const name = profile.displayName || email;
 
     const tokenRecord = {
-      access_token: tokenData.access_token,
+      access_token:  tokenData.access_token,
       refresh_token: tokenData.refresh_token,
-      expires_at: Date.now() + (Number(tokenData.expires_in) || 3600) * 1000,
+      expires_at:    Date.now() + (Number(tokenData.expires_in) || 3600) * 1000,
       email,
       name,
       scope: tokenData.scope
@@ -669,6 +688,7 @@ app.get("/auth/microsoft/callback", async (req, res) => {
     res.redirect(`/?error=${encodeURIComponent(err.message)}`);
   }
 });
+
 
 app.get("/api/microsoft/status", (req, res) => {
   const config = getMicrosoftConfig(req);

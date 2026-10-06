@@ -90,6 +90,18 @@ async function boot() {
     if (err === "microsoft_client_id_missing") {
       toast("Please enter your Microsoft Client ID first.", "error");
       setTimeout(() => openMsModal(), 400);
+    } else if (err === "admin_consent_required") {
+      showAlert(
+        "Your organization requires administrator approval before SmartMail Pro can access this mailbox.\n\nPlease contact your Microsoft 365 administrator and ask them to grant consent for SmartMail Pro.",
+        { title: "🏢 Admin Approval Required", icon: "🔒" }
+      );
+    } else if (err.toLowerCase().includes("cancel")) {
+      toast("Microsoft login was cancelled. Click Connect Outlook to try again.", "info");
+    } else if (err.toLowerCase().includes("expired") || err.toLowerCase().includes("refresh")) {
+      toast("Your Microsoft connection has expired. Please reconnect your account.", "error");
+      setTimeout(() => openMsModal(), 700);
+    } else if (err.toLowerCase().includes("configuration") || err.toLowerCase().includes("invalid_client")) {
+      toast("Microsoft authentication configuration error. Please contact the administrator.", "error");
     } else {
       toast(`Microsoft: ${err}`, "error");
     }
