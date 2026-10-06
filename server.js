@@ -324,11 +324,10 @@ function getMicrosoftConfig(req) {
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || getSetting("ms_client_secret") || "";
 
   // Tenant ID controls which Microsoft accounts can sign in:
-  // "common"       = ALL Microsoft accounts — personal (@outlook.com) + ALL organizations worldwide ✅
-  // "consumers"    = personal @outlook.com/@hotmail.com ONLY
+  // "consumers"    = personal @outlook.com/@hotmail.com (works WITHOUT Azure app changes) ✅
+  // "common"       = personal + ALL organizations (requires Azure app set to "All accounts")
   // "organizations"= work/school accounts ONLY
-  // Default: "common" — supports everyone (personal + any company using Microsoft 365)
-  const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "common";
+  const tenantId = process.env.MICROSOFT_TENANT_ID || getSetting("ms_tenant_id") || "consumers";
 
   // Auto-build redirect URI from the ACTUAL request host (works on both localhost and Render)
   let redirectUri;
