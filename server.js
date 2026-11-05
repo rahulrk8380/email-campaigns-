@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 
 const express = require("express");
 const session = require("express-session");
@@ -95,6 +95,46 @@ try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN pdf_match_status TEXT 
 try { db.prepare("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT").run(); } catch {}
 try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN to_emails TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN cc TEXT DEFAULT ''"); } catch {}
+
+// -- Campaign control flags & row range
+try { db.exec("ALTER TABLE campaigns ADD COLUMN row_start INTEGER DEFAULT 1"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN row_end INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN pause_requested INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN stop_requested INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN cancel_requested INTEGER DEFAULT 0"); } catch {}
+// -- Delivery/read receipt tracking per recipient
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN delivery_receipt TEXT DEFAULT 'not_requested'"); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN read_receipt TEXT DEFAULT 'not_requested'"); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN delivery_requested INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN read_requested INTEGER DEFAULT 0"); } catch {}
+// -- Batch scheduling table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS campaign_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER,
+    batch_index INTEGER NOT NULL,
+    row_start INTEGER NOT NULL,
+    row_end INTEGER NOT NULL,
+    scheduled_at TEXT,
+    delay_seconds INTEGER DEFAULT 5,
+    status TEXT DEFAULT 'scheduled',
+    started_at TEXT,
+    completed_at TEXT,
+    sent INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    total INTEGER DEFAULT 0,
+    pause_requested INTEGER DEFAULT 0,
+    stop_requested INTEGER DEFAULT 0,
+    FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
+  );
+`);
+try { db.exec("ALTER TABLE campaigns ADD COLUMN batch_mode INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause_error TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause_recipient TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN resume_at TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN batch_postpone_secs INTEGER DEFAULT 0"); } catch {}
+
 
 
 db.exec(`
@@ -402,7 +442,7 @@ async function getValidMicrosoftAccessToken() {
   return tokens.access_token;
 }
 
-async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, attachments = [] }) {
+async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, attachments = [], isDeliveryReceiptRequested = false, isReadReceiptRequested = false }) {
   const accessToken = await getValidMicrosoftAccessToken();
 
   // Get sender's email from stored token (used for Reply-To and From display)
@@ -470,7 +510,9 @@ async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, atta
       internetMessageHeaders: [
         { name: "X-Mailer",   value: "SmartMail-Pro" },
         { name: "X-Priority", value: "3"              }
-      ]
+      ],
+      isDeliveryReceiptRequested,
+      isReadReceiptRequested
     },
     saveToSentItems: true
   };
@@ -1209,7 +1251,7 @@ app.post("/api/test-email", auth, async (req, res) => {
 });
 
 app.post("/api/campaigns", auth, (req, res) => {
-  const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds } = req.body || {};
+  const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds, rowStart, rowEnd, requestDeliveryReceipt, requestReadReceipt } = req.body || {};
   const scheduledAt = req.body.scheduledAt || null; // ISO datetime string
 
   if (!subject || !body) {
@@ -1225,6 +1267,13 @@ app.post("/api/campaigns", auth, (req, res) => {
   if (Array.isArray(selectedIds) && selectedIds.length) {
     const ids = new Set(selectedIds.map(Number));
     contacts = contacts.filter(c => ids.has(c.id));
+  }
+
+  // Apply row range filter (1-based, inclusive)
+  if (rowStart || rowEnd) {
+    const rStart = Math.max(0, (parseInt(rowStart) || 1) - 1); // convert to 0-based
+    const rEnd   = rowEnd ? parseInt(rowEnd) : contacts.length;
+    contacts = contacts.slice(rStart, rEnd);
   }
 
   if (!contacts.length) return res.status(400).json({ error: "No recipients selected." });
@@ -1402,6 +1451,196 @@ app.post("/api/campaigns/:id/deny-duplicates", auth, (req, res) => {
 });
 
 
+
+// ── Campaign Control APIs ─────────────────────────────────────────────────────
+
+app.post("/api/campaigns/:id/pause", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+  if (!["sending","resumed"].includes(campaign.status)) {
+    return res.status(400).json({ error: `Cannot pause a ${campaign.status} campaign.` });
+  }
+  db.prepare("UPDATE campaigns SET pause_requested=1 WHERE id=?").run(campaign.id);
+  res.json({ ok: true, message: "Pause requested — will stop after current email completes." });
+});
+
+app.post("/api/campaigns/:id/resume", auth, async (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+  if (campaign.status !== "paused") {
+    return res.status(400).json({ error: `Cannot resume a ${campaign.status} campaign.` });
+  }
+  db.prepare("UPDATE campaigns SET pause_requested=0, stop_requested=0, cancel_requested=0, status='resumed' WHERE id=?").run(campaign.id);
+  res.json({ ok: true, message: "Campaign resumed." });
+  setImmediate(() => resumeCampaign(campaign.id).catch(console.error));
+});
+
+app.post("/api/campaigns/:id/stop", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+  if (["completed","stopped","cancelled","failed"].includes(campaign.status)) {
+    return res.status(400).json({ error: `Campaign is already ${campaign.status}.` });
+  }
+  db.prepare("UPDATE campaigns SET stop_requested=1, pause_requested=0 WHERE id=?").run(campaign.id);
+  res.json({ ok: true, message: "Stop requested — campaign will stop after current email." });
+});
+
+app.post("/api/campaigns/:id/cancel", auth, (req, res) => {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+  if (["completed","cancelled","failed"].includes(campaign.status)) {
+    return res.status(400).json({ error: `Campaign is already ${campaign.status}.` });
+  }
+  db.prepare("UPDATE campaigns SET cancel_requested=1, pause_requested=0, stop_requested=0 WHERE id=?").run(campaign.id);
+  if (!["sending","paused","resumed"].includes(campaign.status)) {
+    db.prepare("UPDATE campaigns SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(campaign.id);
+  }
+  res.json({ ok: true, message: "Campaign cancelled." });
+});
+
+// ── Batch Scheduling APIs ─────────────────────────────────────────────────────
+
+// Save batches for a campaign (called before starting)
+app.post("/api/campaigns/:id/batches", auth, (req, res) => {
+  const { batches } = req.body || {};
+  if (!Array.isArray(batches) || !batches.length) {
+    return res.status(400).json({ error: "batches array required." });
+  }
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+  // Clear existing batches
+  db.prepare("DELETE FROM campaign_batches WHERE campaign_id=?").run(campaign.id);
+
+  const ins = db.prepare(`INSERT INTO campaign_batches (campaign_id,batch_index,row_start,row_end,scheduled_at,delay_seconds,total)
+    VALUES (?,?,?,?,?,?,?)`);
+
+  db.transaction(() => {
+    batches.forEach((b, i) => {
+      ins.run(campaign.id, i, b.rowStart, b.rowEnd, b.scheduledAt || null, b.delaySeconds || 5, b.total || 0);
+    });
+    db.prepare("UPDATE campaigns SET batch_mode=1 WHERE id=?").run(campaign.id);
+  })();
+
+  res.json({ ok: true, count: batches.length });
+});
+
+// Get batches for a campaign
+app.get("/api/campaigns/:id/batches", auth, (req, res) => {
+  const batches = db.prepare("SELECT * FROM campaign_batches WHERE campaign_id=? ORDER BY batch_index").all(req.params.id);
+  res.json({ batches });
+});
+
+// Pause/resume/stop a specific batch
+app.post("/api/campaigns/:id/batches/:batchId/pause", auth, (req, res) => {
+  db.prepare("UPDATE campaign_batches SET pause_requested=1 WHERE id=? AND campaign_id=?").run(req.params.batchId, req.params.id);
+  res.json({ ok: true });
+});
+app.post("/api/campaigns/:id/batches/:batchId/stop", auth, (req, res) => {
+  db.prepare("UPDATE campaign_batches SET stop_requested=1 WHERE id=? AND campaign_id=?").run(req.params.batchId, req.params.id);
+  res.json({ ok: true });
+});
+
+// Resume sending from next pending record (after pause)
+async function resumeCampaign(campaignId) {
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(campaignId);
+  if (!campaign || campaign.status !== "resumed") return;
+
+  const useMicrosoft = campaign.sender_type === "microsoft" || (!campaign.sender_type && Boolean(getSetting("ms_tokens")));
+  sendLock = true;
+
+  try {
+    let transporter = null;
+    if (!useMicrosoft) transporter = getTransporter();
+
+    // Only pick up remaining pending ones — do NOT reset sent records
+    const pending = db.prepare(`
+      SELECT * FROM campaign_recipients
+      WHERE campaign_id=? AND status='pending'
+      ORDER BY id
+    `).all(campaign.id);
+
+    db.prepare("UPDATE campaigns SET status='sending' WHERE id=?").run(campaign.id);
+
+    for (const recipient of pending) {
+      // Check flags before each send
+      const flags = db.prepare("SELECT pause_requested, stop_requested, cancel_requested FROM campaigns WHERE id=?").get(campaign.id);
+      if (flags.cancel_requested) {
+        db.prepare("UPDATE campaigns SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(campaign.id);
+        return;
+      }
+      if (flags.stop_requested) {
+        db.prepare("UPDATE campaigns SET status='stopped', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(campaign.id);
+        return;
+      }
+      if (flags.pause_requested) {
+        db.prepare("UPDATE campaigns SET status='paused' WHERE id=?").run(campaign.id);
+        return;
+      }
+
+      try {
+        const globalAttachments = db.prepare(`
+          SELECT a.original_name, a.file_path, a.mime_type FROM campaign_attachments ca
+          JOIN attachments a ON a.id=ca.attachment_id WHERE ca.campaign_id=?
+        `).all(campaign.id).filter(a => fs.existsSync(a.file_path)).map(a => ({
+          filename: a.original_name, path: a.file_path, contentType: a.mime_type
+        }));
+
+        const personalAttachments = [];
+        if (campaign.pdf_folder_id) {
+          const pdfPath = path.join(__dirname, "uploads", "pdf-folders", campaign.pdf_folder_id);
+          const pdfFile = findPdfForRecipient(pdfPath, recipient.name);
+          if (pdfFile && fs.existsSync(pdfFile)) {
+            personalAttachments.push({ filename: path.basename(pdfFile), path: pdfFile, contentType: "application/pdf" });
+          }
+        }
+
+        const allAttachments = [...personalAttachments, ...globalAttachments];
+        const toEmailsArr = (recipient.to_emails || recipient.email || "").split(",").map(s => s.trim()).filter(s => s && validEmail(s));
+        const ccStr = recipient.cc || "";
+
+        if (!toEmailsArr.length) throw new Error("No valid email address for this recipient.");
+
+        let successNote = "";
+        if (useMicrosoft) {
+          const graphResult = await sendMailViaMicrosoftGraph({
+            toEmails: toEmailsArr, cc: ccStr,
+            subject: recipient.rendered_subject, body: recipient.rendered_body, attachments: allAttachments,
+            isDeliveryReceiptRequested: Boolean(recipient.delivery_requested),
+            isReadReceiptRequested: Boolean(recipient.read_requested)
+          });
+          successNote = `Resumed & sent via Outlook (${graphResult.messageId || "Accepted"})`;
+        } else {
+          const info = await transporter.sendMail(buildSmtpMailOptions({
+            toEmails: toEmailsArr, cc: ccStr,
+            subject: recipient.rendered_subject, body: recipient.rendered_body, attachments: allAttachments
+          }));
+          successNote = `Resumed & sent via SMTP. ID: ${info.messageId || "created"}`;
+        }
+
+        db.prepare("UPDATE campaign_recipients SET status='sent', sent_at=CURRENT_TIMESTAMP, error=? WHERE id=?").run(successNote, recipient.id);
+        db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
+      } catch (e) {
+        db.prepare("UPDATE campaign_recipients SET status='failed', error=? WHERE id=?").run(String(e.message || e).slice(0, 1000), recipient.id);
+        db.prepare("UPDATE campaigns SET failed=failed+1 WHERE id=?").run(campaign.id);
+      }
+
+      const delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+
+    // Check if fully completed
+    const remaining = db.prepare("SELECT COUNT(*) c FROM campaign_recipients WHERE campaign_id=? AND status='pending'").get(campaign.id).c;
+    if (remaining === 0) {
+      db.prepare("UPDATE campaigns SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(campaign.id);
+    }
+  } catch (e) {
+    db.prepare("UPDATE campaigns SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(campaign.id);
+    console.error("Resume campaign error:", e);
+  } finally {
+    sendLock = false;
+  }
+}
 // Reusable send function — used by the /send route and the scheduler
 async function sendCampaign(campaignId) {
   const campaign = db.prepare("SELECT * FROM campaigns WHERE id=?").get(campaignId);
@@ -1519,13 +1758,26 @@ async function sendCampaign(campaignId) {
 
         db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
       } catch (e) {
+        const errMsg = String(e.message || e).slice(0, 1000);
         db.prepare(`
           UPDATE campaign_recipients
           SET status='failed', error=?
           WHERE id=?
-        `).run(String(e.message || e).slice(0, 1000), recipient.id);
-
+        `).run(errMsg, recipient.id);
         db.prepare("UPDATE campaigns SET failed=failed+1 WHERE id=?").run(campaign.id);
+
+        // Auto-pause campaign on first recipient failure
+        if (campaign.fail_pause !== 1) {
+          db.prepare(`
+            UPDATE campaigns
+            SET status='paused', fail_pause=1,
+                fail_pause_error=?, fail_pause_recipient=?,
+                pause_requested=0
+            WHERE id=?
+          `).run(errMsg, recipient.name || recipient.email || 'Unknown', campaign.id);
+          console.log(`[AutoPause] Campaign ${campaign.id} paused after failure: ${recipient.name}`);
+          return; // Stop sending immediately
+        }
       }
 
       // Use campaign-specific delay (set by user in compose page)
@@ -1578,6 +1830,84 @@ app.post("/api/campaigns/:id/send", auth, async (req, res) => {
   res.json({ ok: true, message: "Campaign sending started.", campaignId: campaign.id });
 
   setImmediate(() => sendCampaign(campaign.id).catch(console.error));
+});
+
+// ---- Failure-Pause Info ---------------------------------------------------
+app.get("/api/campaigns/:id/fail-pause-info", auth, (req, res) => {
+  const c = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!c) return res.status(404).json({ error: "Not found" });
+  const batches = db.prepare("SELECT * FROM campaign_batches WHERE campaign_id=? ORDER BY scheduled_at").all(c.id);
+  res.json({
+    fail_pause: c.fail_pause,
+    fail_pause_error: c.fail_pause_error,
+    fail_pause_recipient: c.fail_pause_recipient,
+    status: c.status,
+    delay_seconds: c.delay_seconds,
+    batch_mode: c.batch_mode,
+    batches: batches
+  });
+});
+
+// Resume after failure-pause: continue | stop | delay
+app.post("/api/campaigns/:id/resume-after-failure", auth, async (req, res) => {
+  const { action, resume_at, delay_seconds, postpone_batches, skip_failed } = req.body;
+  const c = db.prepare("SELECT * FROM campaigns WHERE id=?").get(req.params.id);
+  if (!c) return res.status(404).json({ error: "Not found" });
+
+  // Reset fail_pause flag
+  db.prepare("UPDATE campaigns SET fail_pause=0, fail_pause_error='', fail_pause_recipient='' WHERE id=?").run(c.id);
+
+  if (action === 'stop') {
+    db.prepare("UPDATE campaigns SET status='stopped', completed_at=CURRENT_TIMESTAMP WHERE id=?").run(c.id);
+    return res.json({ ok: true, action: 'stopped' });
+  }
+
+  // Update delay if provided
+  if (delay_seconds !== undefined && delay_seconds > 0) {
+    db.prepare("UPDATE campaigns SET delay_seconds=? WHERE id=?").run(Number(delay_seconds), c.id);
+  }
+
+  // Handle batch postponement
+  if (postpone_batches && c.batch_mode) {
+    const batches = db.prepare("SELECT * FROM campaign_batches WHERE campaign_id=? ORDER BY scheduled_at").all(c.id);
+    if (batches.length > 1 && resume_at) {
+      // Calculate offset: how many seconds the resume is delayed compared to original plan
+      const firstBatch = batches[0];
+      const origTime = new Date(firstBatch.scheduled_at).getTime();
+      const newTime = new Date(resume_at).getTime();
+      const offsetMs = newTime - origTime;
+      if (offsetMs > 0) {
+        for (const b of batches) {
+          const newBatchTime = new Date(new Date(b.scheduled_at).getTime() + offsetMs);
+          db.prepare("UPDATE campaign_batches SET scheduled_at=? WHERE id=?").run(newBatchTime.toISOString(), b.id);
+        }
+      }
+    }
+  }
+
+  if (action === 'delay' && resume_at) {
+    // Schedule resume at specified time
+    const msUntilResume = new Date(resume_at).getTime() - Date.now();
+    if (msUntilResume < 0) {
+      // Resume now
+      db.prepare("UPDATE campaigns SET status='paused' WHERE id=?").run(c.id);
+      res.json({ ok: true, action: 'resuming_now' });
+      setImmediate(() => resumeCampaign(c.id).catch(console.error));
+    } else {
+      db.prepare("UPDATE campaigns SET status='scheduled', resume_at=? WHERE id=?").run(resume_at, c.id);
+      res.json({ ok: true, action: 'scheduled', resume_at, ms_until_resume: msUntilResume });
+      setTimeout(() => {
+        db.prepare("UPDATE campaigns SET status='paused', resume_at=NULL WHERE id=?").run(c.id);
+        resumeCampaign(c.id).catch(console.error);
+      }, msUntilResume);
+    }
+    return;
+  }
+
+  // action === 'continue': resume immediately
+  db.prepare("UPDATE campaigns SET status='paused' WHERE id=?").run(c.id);
+  res.json({ ok: true, action: 'continuing' });
+  setImmediate(() => resumeCampaign(c.id).catch(console.error));
 });
 
 app.get("/api/campaigns", auth, (req, res) => {
@@ -1867,4 +2197,10 @@ app.listen(PORT, () => {
     } catch(e) { console.error("Scheduler error:", e); }
   }, 60 * 1000);
 });
+
+
+
+
+
+
 

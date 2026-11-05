@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#171c2e">
   <meta name="description" content="Professional Excel-to-email automation with personalization, attachments and campaign tracking.">
   <link rel="stylesheet" href="/styles.css">
-</head>
+  </head>
 <body>
   <div id="toast" class="toast"></div>
 
@@ -120,7 +120,7 @@
 
       <section id="contactsPage" class="page hidden">
         <div class="page-intro">
-          <div><h3>Contacts</h3><p>Upload a spreadsheet with Email1–Email3 and CC columns. Every row becomes one email.</p></div>
+          <div><p class="page-subtitle">Upload a spreadsheet with Email1–Email3 and CC columns. Every row becomes one email.</p></div>
           <div class="intro-actions">
             <button class="btn outline" onclick="clearContacts()">Clear list</button>
             <button class="btn primary" onclick="showPage('compose')">Compose email →</button>
@@ -167,7 +167,7 @@
 
       <section id="composePage" class="page hidden">
         <div class="page-intro">
-          <div><h3>Compose campaign</h3><p>Write one message. SmartMail sends one email per row with all recipients in To and CC.</p></div>
+          <div><p class="compose-subtitle">Write one message — SmartMail sends one personalized email per row, to all recipients in To and CC.</p></div>
           <div class="recipient-summary"><span id="selectedCount">0</span> rows selected</div>
         </div>
 
@@ -187,12 +187,56 @@
             <label>Campaign name
               <input id="campaignName" placeholder="e.g. Loan Reminder - September">
             </label>
+            <!-- Row Range -->
+            <div class="row-range-panel">
+              <div class="row-range-head">
+                <span>📊 <strong>Excel Row Range</strong></span>
+                <span class="row-range-hint">Select which rows to send (leave blank for all)</span>
+              </div>
+              <div class="row-range-inputs">
+                <label class="row-range-label">
+                  Start Row
+                  <input type="number" id="rowStart" min="1" placeholder="1" class="row-range-input">
+                </label>
+                <span class="row-range-sep">→</span>
+                <label class="row-range-label">
+                  End Row
+                  <input type="number" id="rowEnd" min="1" placeholder="(last)" class="row-range-input">
+                </label>
+                <div id="rowRangePreview" class="row-range-preview"></div>
+              </div>
+            </div>
+            <!-- Batch Scheduling Mode -->
+            <div class="schedule-mode-panel" id="scheduleModePanel">
+              <div class="schedule-mode-head">
+                <span>📦 <strong>Sending Mode</strong></span>
+              </div>
+              <div class="schedule-mode-btns">
+                <button type="button" class="schedule-mode-btn active" id="modeAllRows" onclick="setScheduleMode('all')">All Rows (Default)</button>
+                <button type="button" class="schedule-mode-btn" id="modeBatch" onclick="setScheduleMode('batch')">Custom Batch Schedule</button>
+              </div>
+            </div>
+
+            <!-- Batch Scheduler Panel (shown when Custom Batch selected) -->
+            <div class="batch-scheduler-panel hidden" id="batchSchedulerPanel">
+              <div class="batch-scheduler-head">
+                <span>📅 <strong>Custom Batch Schedule</strong></span>
+                <button type="button" class="btn outline small-btn" onclick="addBatch()">+ Add Batch</button>
+              </div>
+              <div id="batchSummary" class="batch-summary">0 batches · 0 assigned rows</div>
+              <div id="batchList" class="batch-list"></div>
+            </div>
+
             <label>Subject
               <input id="subject" placeholder="Loan {{Loan Number}} - {{Customer Name}}">
             </label>
-            <label>Message body
-              <textarea id="body" rows="11" placeholder="Dear {{Customer Name}},&#10;&#10;Your loan {{Loan Number}} at {{Branch}} branch...&#10;&#10;Regards,&#10;Your Team"></textarea>
-            </label>
+                        <label class="message-body-label">📝 Message Body</label>
+            <div class="body-preview-wrap" id="bodyPreviewWrap" onclick="openBodyEditor()" title="Click to write email body">
+              <div id="bodyPreviewInner">
+                <span class="body-click-hint">📝 Click here to write your email message...<br><small>Bold · Italic · Color · Lists · Variables · Images supported</small></span>
+              </div>
+            </div>
+            <textarea id="body" style="display:none"></textarea>
 
             <!-- Variable insertion bar — dynamically populated from Excel headers -->
             <div class="variable-bar" id="variableBar">
@@ -286,6 +330,25 @@
               <div id="templateList" class="template-list"></div>
             </div>
 
+            <!-- Receipt Options -->
+            <div class="receipt-options-panel">
+              <div class="receipt-options-head">
+                <span>📩 <strong>Email Receipts</strong> <span class="badge-optional">Optional</span></span>
+              </div>
+              <div class="receipt-checkboxes">
+                <label class="receipt-checkbox-label">
+                  <input type="checkbox" id="requestDeliveryReceipt">
+                  <span>Request Delivery Receipt</span>
+                  <small class="muted">Server confirms message was delivered</small>
+                </label>
+                <label class="receipt-checkbox-label">
+                  <input type="checkbox" id="requestReadReceipt">
+                  <span>Request Read Receipt</span>
+                  <small class="muted">Recipient's client sends read notification</small>
+                </label>
+              </div>
+            </div>
+
             <!-- Send Timer -->
             <div class="timer-panel">
               <div class="timer-head">
@@ -310,10 +373,24 @@
                 </div>
               </div>
               <div id="delayControls" class="delay-controls-wrap">
-                <input type="range" id="delaySlider" min="1" max="300" value="5" class="delay-slider">
-                <div class="delay-number-wrap">
-                  <input type="number" id="delayInput" min="1" max="9999" value="5" class="delay-number-input">
-                  <span class="delay-unit-label">sec</span>
+                <div class="delay-presets">
+                  <button type="button" class="delay-preset-btn" onclick="setDelayPreset(0,0)">⚡ Immediate</button>
+                  <button type="button" class="delay-preset-btn" onclick="setDelayPreset(0,5)">5s</button>
+                  <button type="button" class="delay-preset-btn" onclick="setDelayPreset(0,30)">30s</button>
+                  <button type="button" class="delay-preset-btn active" onclick="setDelayPreset(1,0)">1m</button>
+                  <button type="button" class="delay-preset-btn" onclick="setDelayPreset(1,30)">1m 30s</button>
+                  <button type="button" class="delay-preset-btn" onclick="setDelayPreset(2,0)">2m</button>
+                </div>
+                <div class="delay-minsec-wrap">
+                  <div class="delay-minsec-group">
+                    <input type="number" id="delayMinutes" min="0" max="99" value="0" class="delay-minsec-input">
+                    <span class="delay-minsec-label">min</span>
+                  </div>
+                  <span class="delay-minsec-sep">:</span>
+                  <div class="delay-minsec-group">
+                    <input type="number" id="delaySeconds" min="0" max="59" value="5" class="delay-minsec-input">
+                    <span class="delay-minsec-label">sec</span>
+                  </div>
                 </div>
               </div>
               <div id="delayPreview" class="delay-preview">Each email will be sent 5 seconds apart</div>
@@ -379,7 +456,7 @@
 
       <section id="campaignsPage" class="page hidden">
         <div class="page-intro">
-          <div><h3>Campaign History</h3><p>Track every campaign and inspect each recipient's delivery result.</p></div>
+          <div><p class="page-subtitle">Track every campaign and inspect each recipient's delivery result.</p></div>
           <button class="btn outline" onclick="refreshCampaigns()">↻ Refresh</button>
         </div>
 
@@ -401,6 +478,12 @@
               <button class="btn outline small-btn" onclick="downloadReport(currentCampaignId)">⬇ Full Report (.xlsx)</button>
               <button class="btn outline small-btn" onclick="closeCampaignDetails()">Close</button>
             </div>
+          </div>
+          <div id="campaignControlBar" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+            <button id="pauseCampaignBtn" class="btn outline small-btn btn-pause hidden" onclick="pauseCurrentCampaign()">⏸ Pause</button>
+            <button id="resumeCampaignBtn" class="btn outline small-btn btn-resume hidden" onclick="resumeCurrentCampaign()">▶ Resume</button>
+            <button id="stopCampaignBtn" class="btn outline small-btn btn-stop hidden" onclick="stopCurrentCampaign()">⏹ Stop</button>
+            <button id="cancelCampaignBtn" class="btn outline small-btn btn-cancel hidden" onclick="cancelCurrentCampaign()">✕ Cancel</button>
           </div>
           <div class="progress"><div id="progressBar"></div></div>
           <div class="progress-text" id="progressText">0 / 0</div>
@@ -699,5 +782,200 @@
   </div>
 
   <script src="/app.js"></script>
+
+<!-- Body Editor Modal -->
+<div id="bodyEditorModal" class="modal-overlay hidden" style="z-index:3000">
+  <div class="body-editor-card">
+    <div class="body-editor-header">
+      <span class="body-editor-title">✏️ Email Message Body</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="bodyEditorCharCount" style="font-size:11px;color:#64748b">0 characters</span>
+        <button class="btn btn-sm" onclick="clearBodyEditor()" title="Clear all content" style="background:#1e2a40;color:#ef4444;border:1px solid #ef444430;padding:4px 10px;font-size:12px">🗑 Clear</button>
+        <button class="btn btn-primary" onclick="closeBodyEditor()" style="padding:6px 18px;font-size:13px">✅ Done</button>
+      </div>
+    </div>
+    <!-- Formatting Toolbar -->
+    <div class="body-fmt-toolbar">
+      <div class="fmt-group">
+        <select class="fmt-select" onchange="fmtExec('fontName',this.value);this.selectedIndex=0" title="Font">
+          <option value="">Font</option>
+          <option value="Arial">Arial</option>
+          <option value="Georgia">Georgia</option>
+          <option value="Times New Roman">Times New Roman</option>
+          <option value="Courier New">Courier New</option>
+          <option value="Verdana">Verdana</option>
+        </select>
+        <select class="fmt-select" onchange="fmtExec('fontSize',this.value);this.selectedIndex=0" title="Size">
+          <option value="">Size</option>
+          <option value="1">Small</option>
+          <option value="3">Normal</option>
+          <option value="5">Large</option>
+          <option value="7">Huge</option>
+        </select>
+      </div>
+      <div class="fmt-group">
+        <button class="fmt-btn" onclick="fmtExec('bold')" title="Bold"><b>B</b></button>
+        <button class="fmt-btn" onclick="fmtExec('italic')" title="Italic"><i>I</i></button>
+        <button class="fmt-btn" onclick="fmtExec('underline')" title="Underline"><u>U</u></button>
+        <button class="fmt-btn" onclick="fmtExec('strikeThrough')" title="Strikethrough"><s>S</s></button>
+      </div>
+      <div class="fmt-group">
+        <label class="fmt-btn fmt-color-btn" title="Text Color">
+          A<input type="color" style="position:absolute;opacity:0;width:0;height:0" onchange="fmtExec('foreColor',this.value)">
+          <span class="fmt-color-bar" id="fmtColorBar" style="background:#818cf8"></span>
+        </label>
+        <label class="fmt-btn fmt-color-btn" title="Highlight">
+          🖌<input type="color" style="position:absolute;opacity:0;width:0;height:0" onchange="fmtExec('hiliteColor',this.value)">
+          <span class="fmt-color-bar" id="fmtHlBar" style="background:#fbbf24"></span>
+        </label>
+      </div>
+      <div class="fmt-group">
+        <button class="fmt-btn" onclick="fmtExec('justifyLeft')" title="Align Left">⬅</button>
+        <button class="fmt-btn" onclick="fmtExec('justifyCenter')" title="Center">≡</button>
+        <button class="fmt-btn" onclick="fmtExec('justifyRight')" title="Align Right">➡</button>
+      </div>
+      <div class="fmt-group">
+        <button class="fmt-btn" onclick="fmtExec('insertUnorderedList')" title="Bullet List">• List</button>
+        <button class="fmt-btn" onclick="fmtExec('insertOrderedList')" title="Numbered List">1. List</button>
+        <button class="fmt-btn" onclick="fmtExec('indent')" title="Indent">→</button>
+        <button class="fmt-btn" onclick="fmtExec('outdent')" title="Outdent">←</button>
+      </div>
+      <div class="fmt-group">
+        <select class="fmt-select" onchange="fmtExec('formatBlock',this.value);this.selectedIndex=0" title="Heading">
+          <option value="">Style</option>
+          <option value="H1">H1</option>
+          <option value="H2">H2</option>
+          <option value="H3">H3</option>
+          <option value="P">Normal</option>
+          <option value="BLOCKQUOTE">Quote</option>
+        </select>
+      </div>
+      <div class="fmt-group">
+        <button class="fmt-btn" onclick="fmtInsertLink()" title="Insert Link">🔗 Link</button>
+        <button class="fmt-btn" onclick="fmtInsertImage()" title="Insert Image">🖼 Img</button>
+      </div>
+      <div class="fmt-group">
+        <button class="fmt-btn" onclick="fmtExec('undo')" title="Undo">↩</button>
+        <button class="fmt-btn" onclick="fmtExec('redo')" title="Redo">↪</button>
+      </div>
+    </div>
+    <!-- Variables Bar -->
+    <div class="body-editor-vars">
+      <span class="body-vars-label">📌 Insert Variable:</span>
+      <div class="body-var-chips" id="bodyEditorVarChips">
+        <span style="font-size:11px;color:#64748b">Upload Excel to see variables</span>
+      </div>
+    </div>
+    <!-- Content Editable Area -->
+    <div id="bodyContentEditor"
+         class="body-content-editor"
+         contenteditable="true"
+         spellcheck="true"
+         onpaste="handleEditorPaste(event)"
+         oninput="syncBodyFromEditor()"
+         onkeyup="syncBodyFromEditor()">
+    </div>
+    <div class="body-editor-footer">
+      <span class="body-footer-hint">💡 Tip: Use {{Variable}} tokens for personalized data from Excel</span>
+      <span id="bodyEditorCharCount2"></span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ===== Failure-Pause Modal ===== -->
+<div id="failurePauseModal" class="modal-overlay hidden" style="z-index:4000">
+  <div class="failure-pause-card">
+    <div class="fp-header">
+      <span class="fp-title">⚠️ Campaign Auto-Paused — Delivery Failure</span>
+      <span class="fp-badge" id="fpFailCount">0 failed</span>
+    </div>
+    <div class="fp-body">
+      <div class="fp-error-box" id="fpErrorBox">
+        <div class="fp-error-recipient" id="fpErrorRecipient"></div>
+        <div class="fp-error-msg" id="fpErrorMsg"></div>
+      </div>
+      <p class="fp-hint">The campaign has been <b>auto-paused</b> after a recipient failure. Choose what to do next:</p>
+
+      <!-- Action Tabs -->
+      <div class="fp-tabs">
+        <button class="fp-tab active" id="fpTabContinue" onclick="fpSelectTab('continue')">▶ Continue</button>
+        <button class="fp-tab" id="fpTabDelay" onclick="fpSelectTab('delay')">⏰ Set Delay &amp; Resume</button>
+        <button class="fp-tab fp-tab-stop" id="fpTabStop" onclick="fpSelectTab('stop')">■ Stop Campaign</button>
+      </div>
+
+      <!-- Continue Panel -->
+      <div id="fpPanelContinue" class="fp-panel">
+        <p style="color:#94a3b8;font-size:13px">Skip the failed recipient and continue sending to remaining contacts immediately.</p>
+        <label class="fp-check-row">
+          <input type="checkbox" id="fpSkipFailed" checked>
+          <span>Skip failed recipients and continue</span>
+        </label>
+      </div>
+
+      <!-- Delay Panel -->
+      <div id="fpPanelDelay" class="fp-panel hidden">
+        <div class="fp-field-row">
+          <div class="fp-field">
+            <label class="fp-label">📅 Resume Date &amp; Time</label>
+            <div class="fp-date-shortcuts">
+              <button class="fp-shortcut-btn" onclick="fpSetResumeNow()">Now</button>
+              <button class="fp-shortcut-btn" onclick="fpSetResumeIn(30)">+30 min</button>
+              <button class="fp-shortcut-btn" onclick="fpSetResumeIn(60)">+1 hr</button>
+              <button class="fp-shortcut-btn" onclick="fpSetResumeIn(360)">+6 hr</button>
+              <button class="fp-shortcut-btn" onclick="fpSetResumeTomorrow()">Tomorrow 9am</button>
+            </div>
+            <input type="datetime-local" id="fpResumeAt" class="fp-datetime-input">
+          </div>
+          <div class="fp-field">
+            <label class="fp-label">⏱ Delay Per Mail</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="number" id="fpDelayMins" class="fp-num-input" min="0" max="60" value="0" placeholder="0"> <span style="color:#94a3b8;font-size:12px">min</span>
+              <input type="number" id="fpDelaySecs" class="fp-num-input" min="1" max="3600" value="5" placeholder="5"> <span style="color:#94a3b8;font-size:12px">sec</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Batch Adjust Section (shown when batch_mode and >2 batches) -->
+        <div id="fpBatchSection" class="fp-batch-section hidden">
+          <div class="fp-batch-header">
+            <span>📦 This campaign has <b id="fpBatchCount">0</b> scheduled batches</span>
+          </div>
+          <div class="fp-batch-timings" id="fpBatchTimings"></div>
+          <div class="fp-batch-choice">
+            <p style="font-size:13px;color:#fbbf24;margin:8px 0">Should batch timings be adjusted to match the new resume time?</p>
+            <div style="display:flex;gap:12px">
+              <label class="fp-radio-row">
+                <input type="radio" name="fpBatchAdjust" value="auto" checked onchange="fpBatchAdjustChanged('auto')">
+                <span>🔄 Auto-adjust all batch timings proportionally</span>
+              </label>
+              <label class="fp-radio-row">
+                <input type="radio" name="fpBatchAdjust" value="manual" onchange="fpBatchAdjustChanged('manual')">
+                <span>✋ Keep original timings (manual control)</span>
+              </label>
+            </div>
+            <div id="fpBatchAutoPreview" class="fp-batch-preview"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stop Panel -->
+      <div id="fpPanelStop" class="fp-panel hidden">
+        <p style="color:#ef4444;font-size:13px">⚠️ The campaign will be stopped permanently. Already sent emails will not be recalled.</p>
+      </div>
+    </div>
+
+    <div class="fp-footer">
+      <div id="fpCountdownArea" style="font-size:12px;color:#64748b"></div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-primary" id="fpConfirmBtn" onclick="fpConfirm()">▶ Continue Campaign</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
+
+
+
+

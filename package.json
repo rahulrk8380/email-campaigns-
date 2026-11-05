@@ -16,5 +16,8 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.5",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
   }
 }
