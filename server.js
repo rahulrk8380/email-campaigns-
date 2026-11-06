@@ -129,6 +129,9 @@ db.exec(`
   );
 `);
 try { db.exec("ALTER TABLE campaigns ADD COLUMN batch_mode INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN unanimous_delay INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN draft_mode INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE campaigns ADD COLUMN custom_total_seconds INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause_error TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE campaigns ADD COLUMN fail_pause_recipient TEXT DEFAULT ''"); } catch {}
@@ -517,7 +520,58 @@ async function sendMailViaMicrosoftGraph({ to, toEmails, cc, subject, body, atta
     saveToSentItems: true
   };
 
-  const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+  
+// ── Save email as Outlook Draft (does NOT send) ─────────────────────────────
+async function createDraftViaMicrosoftGraph({ toEmails, cc, subject, body, attachments = [] }) {
+  const accessToken = await getValidMicrosoftAccessToken();
+  const senderEmail = getSetting("ms_account_email") || "";
+  const senderName  = getSetting("ms_account_name")  || "SmartMail";
+
+  const graphAttachments = [];
+  for (const att of attachments) {
+    const filePath = att.file_path || att.path;
+    if (filePath && fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath);
+      graphAttachments.push({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: att.original_name || att.filename || path.basename(filePath),
+        contentType: att.mime_type || att.contentType || "application/octet-stream",
+        contentBytes: content.toString("base64")
+      });
+    }
+  }
+
+  const isHtml = /<[a-z][\s\S]*>/i.test(body);
+  const toList = Array.isArray(toEmails) && toEmails.length ? toEmails
+    : [];
+  const toRecipients = toList.filter(validEmail).map(addr => ({ emailAddress: { address: addr } }));
+  const ccList = String(cc || "").split(/[,;]/).map(s => s.trim()).filter(s => s && validEmail(s));
+  const ccRecipients = ccList.map(addr => ({ emailAddress: { address: addr } }));
+
+  const draftPayload = {
+    subject: String(subject || ""),
+    body: { contentType: isHtml ? "HTML" : "Text", content: String(body || "") },
+    toRecipients,
+    ccRecipients,
+    attachments: graphAttachments,
+    from: senderEmail ? { emailAddress: { address: senderEmail, name: senderName } } : undefined
+  };
+
+  const res = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(draftPayload)
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Draft creation failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return { ok: true, draftId: data.id, messageId: data.id };
+}
+
+const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -1251,7 +1305,7 @@ app.post("/api/test-email", auth, async (req, res) => {
 });
 
 app.post("/api/campaigns", auth, (req, res) => {
-  const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds, rowStart, rowEnd, requestDeliveryReceipt, requestReadReceipt } = req.body || {};
+  const { name, subject, body, selectedIds, attachmentIds = [], senderType, pdfFolderId, delaySeconds, rowStart, rowEnd, requestDeliveryReceipt, requestReadReceipt, unanimousDelay, draftMode, customTotalSeconds } = req.body || {};
   const scheduledAt = req.body.scheduledAt || null; // ISO datetime string
 
   if (!subject || !body) {
@@ -1377,6 +1431,20 @@ app.post("/api/campaigns", auth, (req, res) => {
     const totalSkipped = skippedCount + invalidCount;
     if (totalSkipped > 0) {
       db.prepare("UPDATE campaigns SET skipped=? WHERE id=?").run(totalSkipped, id);
+    }
+
+    // Store unanimous delay, draft mode, custom total seconds
+    if (unanimousDelay || draftMode || customTotalSeconds) {
+      db.prepare(`
+        UPDATE campaigns
+        SET unanimous_delay=?, draft_mode=?, custom_total_seconds=?
+        WHERE id=?
+      `).run(
+        unanimousDelay ? 1 : 0,
+        draftMode ? 1 : 0,
+        Number(customTotalSeconds) || 0,
+        id
+      );
     }
 
     return id;
@@ -1728,7 +1796,17 @@ async function sendCampaign(campaignId) {
 
         const toDisplay = toEmailsArr.join(", ");
 
-        if (useMicrosoft) {
+        // Draft mode: save as Outlook draft instead of sending
+        if (campaign.draft_mode && useMicrosoft) {
+          const draftResult = await createDraftViaMicrosoftGraph({
+            toEmails: toEmailsArr, cc: ccStr,
+            subject: recipient.rendered_subject, body: recipient.rendered_body,
+            attachments: allAttachments
+          });
+          db.prepare(`UPDATE campaign_recipients SET status='sent', sent_at=CURRENT_TIMESTAMP, error=? WHERE id=?`)
+            .run(`Saved as Outlook Draft (ID: ${draftResult.draftId})`, recipient.id);
+          db.prepare("UPDATE campaigns SET sent=sent+1 WHERE id=?").run(campaign.id);
+        } else if (useMicrosoft) {
           const graphResult = await sendMailViaMicrosoftGraph({
             toEmails: toEmailsArr,
             cc: ccStr,
@@ -1780,8 +1858,24 @@ async function sendCampaign(campaignId) {
         }
       }
 
-      // Use campaign-specific delay (set by user in compose page)
-      const delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
+            // Unanimous delay: random between 90s and 1800s, OR distribute across custom total time
+      let delayMs;
+      if (campaign.unanimous_delay) {
+        const totalRecipients = pending.length;
+        if (campaign.custom_total_seconds > 0 && totalRecipients > 1) {
+          // Distribute total time evenly but add ±20% random jitter
+          const baseMs = (campaign.custom_total_seconds * 1000) / totalRecipients;
+          const jitter = baseMs * 0.2 * (Math.random() * 2 - 1);
+          delayMs = Math.max(1500, Math.round(baseMs + jitter));
+        } else {
+          // Pure random: 1m30s to 30min (90s – 1800s)
+          const minMs = 90 * 1000;
+          const maxMs = 30 * 60 * 1000;
+          delayMs = Math.round(minMs + Math.random() * (maxMs - minMs));
+        }
+      } else {
+        delayMs = Math.max(1000, Number(campaign.delay_seconds || 5) * 1000);
+      }
       await new Promise(resolve => setTimeout(resolve, delayMs));
 
     }
@@ -1908,6 +2002,31 @@ app.post("/api/campaigns/:id/resume-after-failure", auth, async (req, res) => {
   db.prepare("UPDATE campaigns SET status='paused' WHERE id=?").run(c.id);
   res.json({ ok: true, action: 'continuing' });
   setImmediate(() => resumeCampaign(c.id).catch(console.error));
+});
+
+
+// ── Estimate campaign time ────────────────────────────────────────────────────
+app.get("/api/campaigns/:id/estimate", auth, (req, res) => {
+  const count = Number(req.query.count || 0);
+  if (!count) return res.json({ error: "count required" });
+
+  const minSecs = 90;    // 1m30s
+  const maxSecs = 1800;  // 30min
+  const avgSecs = (minSecs + maxSecs) / 2; // ~15min average
+  const estimatedTotalSecs = Math.round(count * avgSecs);
+
+  const hours   = Math.floor(estimatedTotalSecs / 3600);
+  const minutes = Math.floor((estimatedTotalSecs % 3600) / 60);
+
+  res.json({
+    count,
+    minPerMail: minSecs,
+    maxPerMail: maxSecs,
+    estimatedTotalSecs,
+    estimatedLabel: hours > 0
+      ? `~${hours}h ${minutes}m`
+      : `~${minutes} minutes`
+  });
 });
 
 app.get("/api/campaigns", auth, (req, res) => {

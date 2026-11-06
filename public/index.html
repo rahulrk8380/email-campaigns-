@@ -394,6 +394,37 @@
                 </div>
               </div>
               <div id="delayPreview" class="delay-preview">Each email will be sent 5 seconds apart</div>
+
+              <!-- Unanimous Time Delay Toggle -->
+              <div class="unanimous-row" id="unanimousRow">
+                <div class="unanimous-left">
+                  <button type="button" class="unanimous-toggle-btn" id="unanimousToggleBtn" onclick="toggleUnanimousDelay()">
+                    <span class="unanimous-icon">🎲</span>
+                    <div class="unanimous-text">
+                      <span class="unanimous-name">Unanimous Time Delay</span>
+                      <span class="unanimous-desc">Random delay per email (1m30s – 30min)</span>
+                    </div>
+                    <span class="unanimous-status" id="unanimousStatus">OFF</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Unanimous estimate + custom time (shown when ON) -->
+              <div id="unanimousPanel" class="unanimous-panel hidden">
+                <div class="unanimous-estimate-box" id="unanimousEstimateBox">
+                  <span class="estimate-spinner">⏳</span> Calculating estimate...
+                </div>
+                <div class="unanimous-custom-row">
+                  <label class="unanimous-custom-label">Or set a fixed total campaign duration:</label>
+                  <div class="unanimous-custom-inputs">
+                    <input type="number" id="unanimousTotalHours" min="0" max="99" value="" placeholder="0" class="unm-num-input"> <span class="unm-unit">hr</span>
+                    <input type="number" id="unanimousTotalMins"  min="0" max="59" value="" placeholder="0" class="unm-num-input"> <span class="unm-unit">min</span>
+                    <input type="number" id="unanimousTotalSecs"  min="0" max="59" value="" placeholder="0" class="unm-num-input"> <span class="unm-unit">sec</span>
+                    <button type="button" class="btn-unm-apply" onclick="applyCustomTotalTime()">Apply</button>
+                  </div>
+                  <div id="unanimousCustomPreview" class="unanimous-custom-preview"></div>
+                </div>
+              </div>
             </div>
 
             <!-- Schedule Send — premium toggle -->
@@ -431,7 +462,11 @@
               <button type="button" class="btn outline" id="checkSenderBtn" onclick="checkCurrentSender()">Check Connection</button>
               <button type="button" class="btn outline" onclick="showEmailPreview()">👁 Preview Email</button>
               <button type="button" class="btn outline" onclick="sendTest()">Send test email</button>
-              <button type="button" class="btn primary big" id="sendCampaignBtn" onclick="sendCampaignDirect()">Send to selected rows <span>→</span></button>
+              <div class="send-btn-group">
+                <button type="button" class="btn primary big" id="sendCampaignBtn" onclick="sendCampaignDirect()">🚀 Send Campaign <span>→</span></button>
+                <div class="send-btn-divider"></div>
+                <button type="button" class="btn draft-btn" id="saveDraftBtn" onclick="saveToDraftDirect()" title="Save all emails as Outlook Drafts — review and send one-by-one">📋 Save to Draft</button>
+              </div>
             </div>
             <div id="actionMessage" class="action-message"></div>
 

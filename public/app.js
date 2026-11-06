@@ -10,6 +10,9 @@ let excelHeaders = []; // All headers from last uploaded Excel
 let _validationResult = null; // Cached validation result
 let _pendingSendCallback = null; // Called after confirm modal approved
 // Body editor (native contenteditable modal approach)
+let unanimousDelayOn = false;    // Unanimous Time Delay toggle
+let customTotalSeconds = 0;      // User-set total campaign duration
+let isDraftMode = false;         // Save to Draft mode
 let batches = []; // array of batch objects for custom batch scheduling
 let scheduleMode = 'all'; // 'all' | 'batch'
 let _campaignPollTimer = null;
@@ -782,7 +785,7 @@ async function uploadAttachments(files) {
     setActionMessage(`${selectedAttachments.length} attachment${selectedAttachments.length === 1 ? "" : "s"} ready to send.`, "success");
     toast("Attachments added.", "success");
   } catch (e) {
-    setActionMessage("? " + e.message, "error");
+    setActionMessage((isDraftMode ? '📋 ' : '⚠️ ') + e.message, "error");
     toast(e.message, "error");
   }
 }
@@ -1286,7 +1289,12 @@ function closeMsModal() {
   $("quickSmtpMsg") && ($("quickSmtpMsg").textContent = "");
 }
 
-async function sendCampaignDirect() {
+async function sendCampaignDirect(asDraft = false) {
+  isDraftMode = asDraft;
+  if (asDraft) {
+    const msConnected = msStatus.connected;
+    if (!msConnected) return toast('Save to Draft requires Outlook connection. Please connect first.', 'error');
+  }
   const ids = selectedIds();
 
   if (!ids.length) return toast("Select at least one recipient row.", "error");
@@ -1347,12 +1355,15 @@ async function doSendCampaign(ids, senderType, senderLabel, validResult) {
         attachmentIds: selectedAttachments.map(a => a.id),
         senderType,
         pdfFolderId: currentPdfFolderId || null,
-        delaySeconds: getDelaySeconds(),
+        delaySeconds: unanimousDelayOn ? 90 : getDelaySeconds(),
         scheduledAt: getScheduledAt(),
         rowStart: parseInt($('rowStart')?.value) || null,
         rowEnd: parseInt($('rowEnd')?.value) || null,
         requestDeliveryReceipt: !!$('requestDeliveryReceipt')?.checked,
-        requestReadReceipt: !!$('requestReadReceipt')?.checked
+        requestReadReceipt: !!$('requestReadReceipt')?.checked,
+        unanimousDelay: unanimousDelayOn,
+        draftMode: isDraftMode,
+        customTotalSeconds: customTotalSeconds || 0
       })
     });
 
@@ -1703,6 +1714,146 @@ function downloadReport(campaignId) {
   a.click();
   document.body.removeChild(a);
 }
+
+// ============================================================
+// Unanimous Time Delay
+// ============================================================
+// Called when contacts load — updates unanimous panel pre-emptively
+let _lastContactCount = 0;
+function updateUnanimousWaitingHint() {
+  _lastContactCount = contacts.filter(c => !getContactInvalid(c)).length || contacts.length;
+  // If panel is showing, refresh estimate
+  const panel = document.getElementById('unanimousPanel');
+  if (panel && !panel.classList.contains('hidden')) {
+    loadUnanimousEstimate();
+  }
+  // Update toggle button description to show count
+  const desc = document.querySelector('.unanimous-desc');
+  if (desc && _lastContactCount > 0) {
+    desc.textContent = 'Random delay per email (1m30s – 30min) · ' + _lastContactCount + ' emails loaded';
+  }
+}
+
+async function toggleUnanimousDelay() {
+  unanimousDelayOn = !unanimousDelayOn;
+  customTotalSeconds = 0;
+  const btn  = document.getElementById('unanimousToggleBtn');
+  const stat = document.getElementById('unanimousStatus');
+  const panel = document.getElementById('unanimousPanel');
+  const delayControls = document.getElementById('delayControls');
+  const presets = document.querySelector('.delay-presets');
+
+  if (unanimousDelayOn) {
+    btn.classList.add('active');
+    stat.textContent = 'ON';
+    panel.classList.remove('hidden');
+    if (delayControls) delayControls.style.opacity = '0.35';
+    if (delayControls) delayControls.style.pointerEvents = 'none';
+    if (presets) presets.style.opacity = '0.35';
+    document.getElementById('delayPreview').textContent = '🎲 Random delay: 1m 30s – 30min per email';
+    await loadUnanimousEstimate();
+  } else {
+    btn.classList.remove('active');
+    stat.textContent = 'OFF';
+    panel.classList.add('hidden');
+    if (delayControls) delayControls.style.opacity = '';
+    if (delayControls) delayControls.style.pointerEvents = '';
+    if (presets) presets.style.opacity = '';
+    updateDelayPreview();
+  }
+}
+window.toggleUnanimousDelay = toggleUnanimousDelay;
+
+async function loadUnanimousEstimate() {
+  const box = document.getElementById('unanimousEstimateBox');
+  if (!box) return;
+  const count = contacts.filter(c => selectedContactIds.has(c.id) || selectedContactIds.size === 0).length
+    || contacts.length;
+  if (!count) {
+    box.innerHTML =
+      '<div class="estimate-no-data">' +
+        '<span class="estimate-icon">📂</span>' +
+        '<div>' +
+          '<b>No Excel file uploaded yet</b>' +
+          '<br><span style="color:#64748b;font-size:12px">Upload an Excel file above and the estimate will appear here automatically.</span>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
+  box.innerHTML = '<span class="estimate-spinner">⏳</span> Calculating...';
+  try {
+    const r = await api('/api/campaigns/0/estimate?count=' + count);
+    const minH = Math.floor((count * 90) / 3600);
+    const minM = Math.floor(((count * 90) % 3600) / 60);
+    const maxH = Math.floor((count * 1800) / 3600);
+    const maxM = Math.floor(((count * 1800) % 3600) / 60);
+    const minLabel = minH > 0 ? minH + 'h ' + minM + 'm' : minM + 'm';
+    const maxLabel = maxH > 0 ? maxH + 'h ' + maxM + 'm' : maxM + 'm';
+    // Pre-fill custom time fields with average estimate so user can easily adjust
+    const avgTotalSecs = Math.round((count * 90 + count * 1800) / 2);
+    const avgH = Math.floor(avgTotalSecs / 3600);
+    const avgM = Math.floor((avgTotalSecs % 3600) / 60);
+    const avgS = avgTotalSecs % 60;
+    const hEl = document.getElementById('unanimousTotalHours');
+    const mEl = document.getElementById('unanimousTotalMins');
+    const sEl = document.getElementById('unanimousTotalSecs');
+    if (hEl && !hEl.value) hEl.value = avgH || '';
+    if (mEl && !mEl.value) mEl.value = avgM || '';
+    if (sEl && !sEl.value) sEl.value = avgS || '';
+
+    box.innerHTML =
+      '<div class="estimate-row">' +
+        '<span class="estimate-icon">📊</span>' +
+        '<div style="flex:1">' +
+          '<div style="font-size:13px;font-weight:700;color:#c7d2fe;margin-bottom:4px">' + count + ' emails detected</div>' +
+          '<div class="estimate-time">⏱ Estimated total time: <b>' + minLabel + '</b> → <b>' + maxLabel + '</b></div>' +
+          '<div class="estimate-avg">📧 Per email: <b>1m 30s</b> to <b>30min</b> (random each time)</div>' +
+          '<div class="estimate-avg">⌛ Average estimate: <b>' + r.estimatedLabel + '</b></div>' +
+        '</div>' +
+        '<button class="btn-unm-ok" onclick="confirmUnanimous()">✅ OK, Looks Good</button>' +
+      '</div>';
+  } catch(e) {
+    box.innerHTML = '⚠️ Could not calculate estimate.';
+  }
+}
+window.loadUnanimousEstimate = loadUnanimousEstimate;
+
+function confirmUnanimous() {
+  customTotalSeconds = 0;
+  document.getElementById('unanimousCustomPreview').textContent = '';
+  toast('🎲 Unanimous Time Delay active — random delays will be used', 'success');
+}
+window.confirmUnanimous = confirmUnanimous;
+
+function applyCustomTotalTime() {
+  const h = parseInt(document.getElementById('unanimousTotalHours')?.value) || 0;
+  const m = parseInt(document.getElementById('unanimousTotalMins')?.value)  || 0;
+  const s = parseInt(document.getElementById('unanimousTotalSecs')?.value)  || 0;
+  const total = h * 3600 + m * 60 + s;
+  if (!total) return toast('Enter a total duration (hours / minutes / seconds)', 'error');
+  customTotalSeconds = total;
+
+  const count = contacts.length || 1;
+  const perMailSecs = Math.round(total / count);
+  const ph = Math.floor(total / 3600), pm = Math.floor((total % 3600) / 60), ps = total % 60;
+  const durationLabel = (ph ? ph + 'h ' : '') + (pm ? pm + 'm ' : '') + (ps ? ps + 's' : '');
+  document.getElementById('unanimousCustomPreview').innerHTML =
+    '✅ Campaign will complete in <b>' + durationLabel.trim() + '</b> ' +
+    '(~' + perMailSecs + 's avg per email across ' + count + ' emails)';
+  toast('Custom total time set: ' + durationLabel.trim(), 'success');
+}
+window.applyCustomTotalTime = applyCustomTotalTime;
+
+// ============================================================
+// Save to Draft
+// ============================================================
+async function saveToDraftDirect() {
+  isDraftMode = true;
+  await sendCampaignDirect(true);
+  isDraftMode = false;
+}
+window.saveToDraftDirect = saveToDraftDirect;
+
 window.downloadReport = downloadReport;
 
 // ============================================================
